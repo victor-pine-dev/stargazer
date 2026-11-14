@@ -5,6 +5,13 @@ import type {
   TourStopItem,
 } from '../astro/celestialIndex';
 import { azimuthToCardinal, formatHMS } from '../astro/coordinates';
+import {
+  ISS_NORAD_ID,
+  type SatellitePassPrediction,
+  type SatelliteSystemSnapshot,
+  type SatelliteTelemetryState,
+} from '../astro/satellites';
+import type { GyroControllerState } from '../services/gyroService';
 import type { ScreenLabelItem } from '../render/constellationLayer';
 import type {
   LayerVisibilityState,
@@ -169,6 +176,35 @@ export class HudController {
   private tourIsDaylightPreview = false;
   private lastSunAltDeg = -20;
 
+  // Phase 4: ISS & Satellites Drawer + Mobile AR Gyroscope HUD
+  private readonly issToggleBtn: HTMLButtonElement;
+  private readonly issPanel: HTMLElement;
+  private readonly issCloseBtn: HTMLButtonElement;
+  private readonly issTleSourceEl: HTMLElement;
+  private readonly issSunlitBadge: HTMLElement;
+  private readonly issLiveAltAz: HTMLElement;
+  private readonly issLiveOrbit: HTMLElement;
+  private readonly issTrackBtn: HTMLButtonElement;
+  private readonly issRefreshBtn: HTMLButtonElement;
+  private readonly issPassListEl: HTMLOListElement;
+  private readonly satCatalogListEl: HTMLUListElement;
+  private lastPassesRenderKey = '';
+  private lastSatListRenderMs = 0;
+  private readonly satRowPool = new Map<
+    number,
+    { btn: HTMLButtonElement; titleEl: HTMLElement; subEl: HTMLElement; posEl: HTMLElement; magEl: HTMLElement }
+  >();
+
+  private readonly arGyroBtn: HTMLButtonElement;
+  private readonly arHudBanner: HTMLElement;
+  private readonly arStatusBadge: HTMLElement;
+  private readonly arStatusText: HTMLElement;
+  private readonly arHeadingReadout: HTMLElement;
+  private readonly arTrimLeftBtn: HTMLButtonElement;
+  private readonly arTrimResetBtn: HTMLButtonElement;
+  private readonly arTrimRightBtn: HTMLButtonElement;
+  private readonly arExitBtn: HTMLButtonElement;
+
   private readonly labelPool = new Map<string, HTMLSpanElement>();
 
   constructor(engine: SkyEngine, initialLocation: ObserverLocation) {
@@ -249,6 +285,28 @@ export class HudController {
     this.tourNextBtn = document.getElementById('tour-next-btn') as HTMLButtonElement;
     this.tourStepReadout = document.getElementById('tour-step-readout')!;
     this.tourStopListEl = document.getElementById('tour-stop-list') as HTMLOListElement;
+
+    this.issToggleBtn = document.getElementById('iss-toggle-btn') as HTMLButtonElement;
+    this.issPanel = document.getElementById('iss-panel')!;
+    this.issCloseBtn = document.getElementById('iss-close-btn') as HTMLButtonElement;
+    this.issTleSourceEl = document.getElementById('iss-tle-source')!;
+    this.issSunlitBadge = document.getElementById('iss-sunlit-badge')!;
+    this.issLiveAltAz = document.getElementById('iss-live-altaz')!;
+    this.issLiveOrbit = document.getElementById('iss-live-orbit')!;
+    this.issTrackBtn = document.getElementById('iss-track-btn') as HTMLButtonElement;
+    this.issRefreshBtn = document.getElementById('iss-refresh-btn') as HTMLButtonElement;
+    this.issPassListEl = document.getElementById('iss-pass-list') as HTMLOListElement;
+    this.satCatalogListEl = document.getElementById('sat-catalog-list') as HTMLUListElement;
+
+    this.arGyroBtn = document.getElementById('ar-gyro-btn') as HTMLButtonElement;
+    this.arHudBanner = document.getElementById('ar-hud-banner')!;
+    this.arStatusBadge = document.getElementById('ar-status-badge')!;
+    this.arStatusText = document.getElementById('ar-status-text')!;
+    this.arHeadingReadout = document.getElementById('ar-heading-readout')!;
+    this.arTrimLeftBtn = document.getElementById('ar-trim-left') as HTMLButtonElement;
+    this.arTrimResetBtn = document.getElementById('ar-trim-reset') as HTMLButtonElement;
+    this.arTrimRightBtn = document.getElementById('ar-trim-right') as HTMLButtonElement;
+    this.arExitBtn = document.getElementById('ar-exit-btn') as HTMLButtonElement;
 
     ensureModernDialogSupport(this.locationDialog);
     ensureModernDialogSupport(this.searchDialog);
@@ -571,6 +629,50 @@ export class HudController {
     this.tourNextBtn.addEventListener('click', () => stepTour(1));
     this.inspectTourPrevBtn.addEventListener('click', () => stepTour(-1));
     this.inspectTourNextBtn.addEventListener('click', () => stepTour(1));
+
+    // ISS & Satellites drawer
+    this.issToggleBtn.addEventListener('click', () => {
+      const opening = this.issPanel.hidden;
+      this.setIssPanelOpen(opening);
+    });
+    this.issCloseBtn.addEventListener('click', () => {
+      this.setIssPanelOpen(false);
+    });
+    this.issTrackBtn.addEventListener('click', () => {
+      this.engine.trackIss();
+      this.syncLayerToggleButtons();
+    });
+    this.issRefreshBtn.addEventListener('click', async () => {
+      this.issRefreshBtn.disabled = true;
+      this.issRefreshBtn.textContent = 'Syncing…';
+      try {
+        const result = await this.engine.refreshSatelliteTles();
+        this.issTleSourceEl.textContent =
+          result.source === 'celestrak-live'
+            ? `CelesTrak Live GP · ${result.updatedCount} TLEs synced`
+            : result.source === 'celestrak-cache'
+              ? `CelesTrak Cached TLEs (${result.updatedCount} objects)`
+              : 'Embedded Epoch TLEs (offline fallback)';
+      } finally {
+        this.issRefreshBtn.disabled = false;
+        this.issRefreshBtn.textContent = 'Refresh TLEs';
+      }
+    });
+
+    // Mobile AR Gyroscope mode
+    this.arGyroBtn.addEventListener('click', async () => {
+      const state = await this.engine.toggleArGyro();
+      this.updateArBanner(state);
+    });
+    this.arTrimLeftBtn.addEventListener('click', () => this.engine.adjustArCompassOffset(-5));
+    this.arTrimRightBtn.addEventListener('click', () => this.engine.adjustArCompassOffset(5));
+    this.arTrimResetBtn.addEventListener('click', () => this.engine.resetArCalibration());
+    this.arExitBtn.addEventListener('click', async () => {
+      if (this.engine.getArGyroState().status !== 'off') {
+        const state = await this.engine.toggleArGyro();
+        this.updateArBanner(state);
+      }
+    });
   }
 
   private renderSearchResults(): void {
@@ -581,7 +683,7 @@ export class HudController {
     if (this.currentSearchResults.length === 0) {
       const empty = document.createElement('li');
       empty.className = 'preset-item-btn';
-      empty.textContent = 'No matching stars, planets, DSOs, or constellations.';
+      empty.textContent = 'No matching stars, planets, satellites, DSOs, or constellations.';
       this.searchResultsEl.appendChild(empty);
       return;
     }
@@ -643,16 +745,233 @@ export class HudController {
     this.activeTourIndex = null;
     this.renderTourList();
     this.searchDialog.close('select');
+    if (item.kind === 'satellite') {
+      this.engine.setLayers({ satellites: true });
+      this.syncLayerToggleButtons();
+    }
     this.engine.selectObject(item.ref, { flyTo: true, track: true });
   }
 
   private setTourPanelOpen(open: boolean): void {
+    if (open && !this.issPanel.hidden) {
+      this.setIssPanelOpen(false);
+    }
     this.tourPanel.hidden = !open;
     this.tourToggleBtn.classList.toggle('is-active', open);
     this.tourToggleBtn.setAttribute('aria-expanded', String(open));
     if (open) {
       this.refreshTourStops();
     }
+  }
+
+  private setIssPanelOpen(open: boolean): void {
+    if (open && !this.tourPanel.hidden) {
+      this.setTourPanelOpen(false);
+    }
+    this.issPanel.hidden = !open;
+    this.issToggleBtn.classList.toggle('is-active', open);
+    this.issToggleBtn.setAttribute('aria-expanded', String(open));
+    if (open) {
+      this.lastPassesRenderKey = '';
+      this.lastSatListRenderMs = 0;
+      this.updateSatelliteDrawer(this.engine.getSatelliteSnapshot(), null);
+    }
+  }
+
+  private syncLayerToggleButtons(): void {
+    const layers = this.engine.getLayers();
+    document.querySelectorAll<HTMLButtonElement>('[data-layer]').forEach((btn) => {
+      const key = btn.dataset.layer as keyof LayerVisibilityState | undefined;
+      if (!key) return;
+      const active = Boolean(layers[key]);
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    });
+  }
+
+  private formatPassDayLabel(timestampMs: number, referenceMs: number): string {
+    const passDate = new Date(timestampMs);
+    const refDate = new Date(referenceMs);
+    const passDay = new Date(passDate.getFullYear(), passDate.getMonth(), passDate.getDate()).getTime();
+    const refDay = new Date(refDate.getFullYear(), refDate.getMonth(), refDate.getDate()).getTime();
+    const dayDiff = Math.round((passDay - refDay) / 86_400_000);
+    if (dayDiff === 0) return 'Today';
+    if (dayDiff === 1) return 'Tomorrow';
+    return passDate.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
+
+  private formatPassClock(timestampMs: number): string {
+    return new Date(timestampMs).toLocaleTimeString([], {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+
+  private updateSatelliteDrawer(
+    satSnap: SatelliteSystemSnapshot,
+    selectedId: string | null,
+  ): void {
+    if (this.issPanel.hidden) return;
+
+    const sourceLabel =
+      satSnap.tleSource === 'celestrak-live'
+        ? 'SGP4 Worker · CelesTrak Live TLEs'
+        : satSnap.tleSource === 'celestrak-cache'
+          ? 'SGP4 Worker · CelesTrak Cached TLEs'
+          : 'SGP4 Worker · Embedded Epoch TLEs';
+    this.issTleSourceEl.textContent = sourceLabel;
+
+    const iss = satSnap.satellites.find((s) => s.noradId === ISS_NORAD_ID);
+    if (iss) {
+      this.issSunlitBadge.textContent = iss.isSunlit ? 'SUNLIT' : 'ECLIPSED';
+      this.issSunlitBadge.classList.toggle('badge-horizon', iss.isSunlit);
+      this.issLiveAltAz.textContent = `ALT ${iss.altDeg >= 0 ? '+' : ''}${iss.altDeg.toFixed(1)}° · AZ ${iss.azDeg.toFixed(1)}° ${iss.azCardinal}`;
+      this.issLiveOrbit.textContent = `Orbit ${Math.round(iss.altitudeKm)} km · Range ${Math.round(iss.rangeKm)} km · ${iss.speedKmS.toFixed(2)} km/s`;
+    }
+
+    const passesKey = satSnap.issPasses
+      .map((p) => `${p.startTimeMs}:${Math.round(p.maxAltDeg)}:${p.quality}`)
+      .join('|');
+    if (passesKey !== this.lastPassesRenderKey) {
+      this.lastPassesRenderKey = passesKey;
+      this.renderIssPassList(satSnap.issPasses, satSnap.timestampMs);
+    }
+
+    const nowMs = performance.now();
+    if (nowMs - this.lastSatListRenderMs >= 900) {
+      this.lastSatListRenderMs = nowMs;
+      this.renderSatelliteCatalogList(satSnap.satellites, selectedId);
+    }
+  }
+
+  private renderIssPassList(passes: SatellitePassPrediction[], refTimeMs: number): void {
+    this.issPassListEl.textContent = '';
+    if (passes.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'preset-item-region';
+      empty.textContent = 'No ISS passes peaking ≥ 10° in the next 36 hours.';
+      this.issPassListEl.appendChild(empty);
+      return;
+    }
+
+    for (const pass of passes.slice(0, 6)) {
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tour-stop-btn';
+      btn.classList.toggle('is-active', pass.quality === 'Visible Pass');
+
+      const main = document.createElement('span');
+      main.className = 'tour-stop-main';
+      const title = document.createElement('span');
+      title.className = 'tour-stop-title';
+      title.textContent = `${this.formatPassDayLabel(pass.startTimeMs, refTimeMs)} · ${this.formatPassClock(pass.startTimeMs)}–${this.formatPassClock(pass.endTimeMs)}`;
+      const sub = document.createElement('span');
+      sub.className = 'tour-stop-sub';
+      sub.textContent = `${pass.quality} · ${pass.startCardinal} → ${pass.maxCardinal} → ${pass.endCardinal}`;
+      main.append(title, sub);
+
+      const meta = document.createElement('span');
+      meta.className = 'tour-stop-meta mono';
+      const peak = document.createElement('span');
+      peak.textContent = `Peak ${Math.round(pass.maxAltDeg)}°`;
+      const mag = document.createElement('span');
+      mag.textContent = pass.isSunlit ? `m ${pass.peakVmag.toFixed(1)}` : 'Umbra';
+      meta.append(peak, mag);
+
+      btn.append(main, meta);
+      btn.addEventListener('click', () => {
+        this.engine.jumpToSatellitePass(pass);
+        this.syncLayerToggleButtons();
+      });
+      li.appendChild(btn);
+      this.issPassListEl.appendChild(li);
+    }
+  }
+
+  private renderSatelliteCatalogList(
+    satellites: SatelliteTelemetryState[],
+    selectedId: string | null,
+  ): void {
+    const sorted = [...satellites].sort((a, b) => {
+      if (a.isAboveHorizon !== b.isAboveHorizon) return a.isAboveHorizon ? -1 : 1;
+      if (a.noradId === ISS_NORAD_ID) return -1;
+      if (b.noradId === ISS_NORAD_ID) return 1;
+      return b.altDeg - a.altDeg;
+    });
+
+    for (const sat of sorted) {
+      let row = this.satRowPool.get(sat.noradId);
+      if (!row) {
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tour-stop-btn';
+
+        const main = document.createElement('span');
+        main.className = 'tour-stop-main';
+        const titleEl = document.createElement('span');
+        titleEl.className = 'tour-stop-title';
+        const subEl = document.createElement('span');
+        subEl.className = 'tour-stop-sub';
+        main.append(titleEl, subEl);
+
+        const meta = document.createElement('span');
+        meta.className = 'tour-stop-meta mono';
+        const posEl = document.createElement('span');
+        const magEl = document.createElement('span');
+        meta.append(posEl, magEl);
+
+        btn.append(main, meta);
+        btn.addEventListener('click', () => {
+          this.engine.setLayers({ satellites: true });
+          this.syncLayerToggleButtons();
+          this.engine.selectObject(
+            { id: sat.id, kind: 'satellite', satNoradId: sat.noradId },
+            { flyTo: true, track: true, fovDeg: sat.noradId === ISS_NORAD_ID ? 42 : 46 },
+          );
+        });
+        li.appendChild(btn);
+        this.satCatalogListEl.appendChild(li);
+        row = { btn, titleEl, subEl, posEl, magEl };
+        this.satRowPool.set(sat.noradId, row);
+      }
+
+      row.btn.classList.toggle('is-active', selectedId === sat.id);
+      row.titleEl.textContent = sat.name;
+      row.subEl.textContent = `${sat.category} · ${Math.round(sat.altitudeKm)} km · ${sat.isSunlit ? 'Sunlit' : 'Shadow'}`;
+      row.posEl.textContent = sat.isAboveHorizon
+        ? `${sat.altDeg.toFixed(0)}° ${sat.azCardinal}`
+        : `Below (${sat.altDeg.toFixed(0)}°)`;
+      row.magEl.textContent = `m ${sat.vmag.toFixed(1)}`;
+    }
+  }
+
+  private updateArBanner(arGyro: GyroControllerState): void {
+    const isOn = arGyro.status !== 'off';
+    this.arGyroBtn.classList.toggle('is-active', isOn);
+    this.arGyroBtn.setAttribute('aria-pressed', String(isOn));
+    this.arHudBanner.hidden = !isOn;
+
+    if (!isOn) return;
+
+    this.arStatusBadge.textContent =
+      arGyro.status === 'active'
+        ? 'LIVE GYRO'
+        : arGyro.status === 'simulated'
+          ? 'SIMULATED SENSOR'
+          : arGyro.status === 'denied'
+            ? 'PERMISSION DENIED'
+            : 'REQUESTING';
+    this.arStatusBadge.classList.toggle('badge-horizon', arGyro.status === 'simulated');
+    this.arStatusText.textContent = arGyro.statusMessage;
+
+    const trimStr =
+      arGyro.compassOffsetDeg === 0
+        ? ''
+        : ` · Trim ${arGyro.compassOffsetDeg > 0 ? '+' : ''}${Math.round(arGyro.compassOffsetDeg)}°`;
+    this.arHeadingReadout.textContent = `HDG ${arGyro.azDeg.toFixed(0)}° ${azimuthToCardinal(arGyro.azDeg)} · ALT ${arGyro.altDeg >= 0 ? '+' : ''}${arGyro.altDeg.toFixed(0)}°${trimStr}`;
   }
 
   private refreshTourStops(): void {
@@ -871,6 +1190,11 @@ export class HudController {
       snapshot.selectedReticle,
       snapshot.isTrackingObject,
     );
+    this.updateSatelliteDrawer(
+      snapshot.satellites,
+      snapshot.selectedObject?.id ?? null,
+    );
+    this.updateArBanner(snapshot.arGyro);
     this.renderProjectedLabels(snapshot.labels);
   }
 

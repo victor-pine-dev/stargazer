@@ -25,12 +25,21 @@ import {
   type SolarSystemBodyState,
   type SolarSystemEphemeris,
 } from '../astro/solarSystem';
+import {
+  ISS_NORAD_ID,
+  SatelliteTrackerController,
+  type SatellitePassPrediction,
+  type SatelliteSystemSnapshot,
+  type TleSourceKind,
+} from '../astro/satellites';
 import type { LoadedCelestialData } from '../data/catalogLoader';
+import { GyroSensorController, type GyroControllerState } from '../services/gyroService';
 import type { ObserverLocation } from '../services/locationService';
 import { createAtmosphereDome } from './atmosphereDome';
 import { createCompassHorizon } from './compassHorizon';
 import { createConstellationLayer, type ScreenLabelItem } from './constellationLayer';
 import { createDsoLayer } from './dsoLayer';
+import { createSatelliteLayer } from './satelliteLayer';
 import { createSolarSystemLayer } from './solarSystemLayer';
 import { createStarfieldLayer } from './starfieldLayer';
 
@@ -42,6 +51,7 @@ export interface LayerVisibilityState {
   horizon: boolean;
   planets: boolean;
   dso: boolean;
+  satellites: boolean;
 }
 
 export type TimeMode = 'live' | 'tonight' | 'sunset' | 'custom';
@@ -72,6 +82,8 @@ export interface TelemetrySnapshot {
   selectedObject: InspectedObjectTelemetry | null;
   selectedReticle: ReticleScreenPosition | null;
   isTrackingObject: boolean;
+  satellites: SatelliteSystemSnapshot;
+  arGyro: GyroControllerState;
 }
 
 export interface SkyEngineOptions {
@@ -122,8 +134,11 @@ export class SkyEngine {
   private readonly starfield: ReturnType<typeof createStarfieldLayer>;
   private readonly dso: ReturnType<typeof createDsoLayer>;
   private readonly solarSystem: ReturnType<typeof createSolarSystemLayer>;
+  private readonly satellitesLayer: ReturnType<typeof createSatelliteLayer>;
   private readonly constellations: ReturnType<typeof createConstellationLayer>;
   private readonly horizon: ReturnType<typeof createCompassHorizon>;
+  private readonly satTracker: SatelliteTrackerController;
+  private readonly gyro: GyroSensorController;
 
   private readonly dsoPickAnchors: Array<{ id: string; mag: number; j2000Vec: THREE.Vector3 }>;
 
@@ -142,6 +157,7 @@ export class SkyEngine {
     horizon: true,
     planets: true,
     dso: true,
+    satellites: true,
   };
 
   private backendLabel: TelemetrySnapshot['backendLabel'] = 'WebGPU · WGSL';
@@ -225,6 +241,7 @@ export class SkyEngine {
     this.starfield = createStarfieldLayer(options.catalog.stars);
     this.dso = createDsoLayer(options.catalog.dsos);
     this.solarSystem = createSolarSystemLayer();
+    this.satellitesLayer = createSatelliteLayer();
     this.constellations = createConstellationLayer(
       options.catalog.constellations,
       options.catalog.namedStarList,
@@ -235,8 +252,22 @@ export class SkyEngine {
     this.scene.add(this.starfield.mesh);
     this.scene.add(this.dso.mesh);
     this.scene.add(this.solarSystem.group);
+    this.scene.add(this.satellitesLayer.group);
     this.scene.add(this.constellations.group);
     this.scene.add(this.horizon.group);
+
+    this.satTracker = new SatelliteTrackerController(
+      this.location,
+      this.simTimestampMs,
+      () => {
+        this.lastHudPushMs = 0;
+      },
+    );
+    void this.satTracker.refreshTles(this.location, this.simTimestampMs, null, false);
+
+    this.gyro = new GyroSensorController(() => {
+      this.lastHudPushMs = 0;
+    });
 
     this.lastEphemeris = computeSolarSystemEphemeris(
       new Date(this.simTimestampMs),
@@ -286,9 +317,16 @@ export class SkyEngine {
     return observedDate;
   }
 
+  private getSelectedSatNoradId(): number | null {
+    return this.selectedRef?.kind === 'satellite' && typeof this.selectedRef.satNoradId === 'number'
+      ? this.selectedRef.satNoradId
+      : null;
+  }
+
   setLocation(loc: ObserverLocation): void {
     this.location = loc;
     this.refreshAstroState();
+    this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     this.lastHudPushMs = 0;
   }
 
@@ -306,6 +344,7 @@ export class SkyEngine {
       this.simTimestampMs = computePresetDate(new Date(), this.location.longitude, mode).getTime();
     }
     this.refreshAstroState();
+    this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     this.lastHudPushMs = 0;
   }
 
@@ -339,6 +378,7 @@ export class SkyEngine {
     this.simTimestampMs = ms;
     this.timeMode = mode;
     this.refreshAstroState();
+    this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     this.lastHudPushMs = 0;
   }
 
@@ -349,6 +389,7 @@ export class SkyEngine {
     this.simTimestampMs = nextDate.getTime();
     this.timeMode = 'custom';
     this.refreshAstroState();
+    this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     this.lastHudPushMs = 0;
   }
 
@@ -358,6 +399,7 @@ export class SkyEngine {
     this.timeWarpMultiplier = 1;
     this.simTimestampMs = Date.now();
     this.refreshAstroState();
+    this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     this.lastHudPushMs = 0;
   }
 
@@ -370,6 +412,9 @@ export class SkyEngine {
   }
 
   lookAt(azDeg: number, altDeg: number): void {
+    if (this.gyro.isEnabled()) {
+      this.gyro.stop();
+    }
     this.slerpActive = false;
     this.isTrackingObject = false;
     this.targetAzDeg = normalizeDeg360(azDeg);
@@ -377,6 +422,9 @@ export class SkyEngine {
   }
 
   flyTo(azDeg: number, altDeg: number, fovDeg?: number): void {
+    if (this.gyro.isEnabled()) {
+      this.gyro.stop();
+    }
     this.slerpStartAzDeg = this.azDeg;
     this.slerpStartAltDeg = this.altDeg;
     this.targetAzDeg = normalizeDeg360(azDeg);
@@ -403,6 +451,7 @@ export class SkyEngine {
     this.selectedRef = ref;
     this.isTrackingObject = Boolean(options?.track && ref);
 
+    const satSnap = this.satTracker.getSnapshot();
     const observedDate = new Date(this.simTimestampMs);
     const telemetry = ref
       ? computeObjectTelemetry(
@@ -412,6 +461,8 @@ export class SkyEngine {
           this.eqToWorld,
           observedDate,
           this.location,
+          satSnap.satellites,
+          satSnap.issPasses,
         )
       : null;
 
@@ -421,6 +472,10 @@ export class SkyEngine {
       this.onSelectObject?.(null);
       this.lastHudPushMs = 0;
       return null;
+    }
+
+    if (ref?.kind === 'satellite') {
+      this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     }
 
     if (options?.flyTo) {
@@ -439,6 +494,7 @@ export class SkyEngine {
 
   centerSelectedObject(targetFovDeg?: number): void {
     if (!this.selectedRef) return;
+    const satSnap = this.satTracker.getSnapshot();
     const telemetry = computeObjectTelemetry(
       this.selectedRef,
       this.catalog,
@@ -446,6 +502,8 @@ export class SkyEngine {
       this.eqToWorld,
       new Date(this.simTimestampMs),
       this.location,
+      satSnap.satellites,
+      satSnap.issPasses,
     );
     if (!telemetry) return;
     this.isTrackingObject = true;
@@ -460,7 +518,75 @@ export class SkyEngine {
       this.catalog,
       this.lastEphemeris,
       this.eqToWorld,
+      32,
+      this.satTracker.getSnapshot().satellites,
     );
+  }
+
+  getSatelliteSnapshot(): SatelliteSystemSnapshot {
+    return this.satTracker.getSnapshot();
+  }
+
+  refreshSatelliteTles(): Promise<{ source: TleSourceKind; updatedCount: number }> {
+    return this.satTracker.refreshTles(
+      this.location,
+      this.simTimestampMs,
+      this.getSelectedSatNoradId(),
+      true,
+    );
+  }
+
+  trackIss(): void {
+    this.setLayers({ satellites: true });
+    this.selectObject(
+      { id: `sat-${ISS_NORAD_ID}`, kind: 'satellite', satNoradId: ISS_NORAD_ID },
+      { flyTo: true, track: true, fovDeg: 48 },
+    );
+  }
+
+  jumpToSatellitePass(pass: SatellitePassPrediction): void {
+    if (this.gyro.isEnabled()) {
+      this.gyro.stop();
+    }
+    this.setLayers({ satellites: true });
+    const jumpMs = pass.startTimeMs + Math.min(30_000, Math.round(pass.durationSec * 250));
+    this.simTimestampMs = jumpMs;
+    this.timeMode = 'custom';
+    this.isPlaying = true;
+    this.timeWarpMultiplier = 1;
+    this.refreshAstroState();
+    this.satTracker.requestUpdate(this.simTimestampMs, this.location, pass.noradId, true);
+    this.selectObject(
+      { id: `sat-${pass.noradId}`, kind: 'satellite', satNoradId: pass.noradId },
+      { flyTo: true, track: true, fovDeg: 58 },
+    );
+  }
+
+  async toggleArGyro(): Promise<GyroControllerState> {
+    if (this.gyro.isEnabled()) {
+      this.gyro.stop();
+      this.lastHudPushMs = 0;
+      return this.gyro.getState();
+    }
+    this.slerpActive = false;
+    this.isTrackingObject = false;
+    await this.gyro.requestAndStart(this.azDeg, this.altDeg);
+    this.lastHudPushMs = 0;
+    return this.gyro.getState();
+  }
+
+  adjustArCompassOffset(deltaDeg: number): void {
+    this.gyro.adjustCompassOffset(deltaDeg);
+    this.lastHudPushMs = 0;
+  }
+
+  resetArCalibration(): void {
+    this.gyro.resetCalibration();
+    this.lastHudPushMs = 0;
+  }
+
+  getArGyroState(): GyroControllerState {
+    return this.gyro.getState();
   }
 
   getTonightsBestTour(): { stops: TourStopItem[]; evalDate: Date; isDaylightPreview: boolean } {
@@ -488,6 +614,29 @@ export class SkyEngine {
       const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
       return t * t * (3 - 2 * t);
     };
+
+    // 0. Check visible Satellites & Space Stations
+    if (this.layers.satellites) {
+      const sats = this.satTracker.getSnapshot().satellites;
+      for (const sat of sats) {
+        if (sat.altDeg < -1.0) continue;
+        this.tempPickProj
+          .set(sat.worldDir[0] * 446, sat.worldDir[1] * 446, sat.worldDir[2] * 446)
+          .project(this.camera);
+        if (this.tempPickProj.z < -1 || this.tempPickProj.z > 1) continue;
+
+        const sx = (this.tempPickProj.x * 0.5 + 0.5) * this.viewportWidth;
+        const sy = (-this.tempPickProj.y * 0.5 + 0.5) * this.viewportHeight;
+        const distPx = Math.hypot(sx - screenX, sy - screenY);
+        if (distPx <= 28) {
+          const score = distPx - (sat.noradId === ISS_NORAD_ID ? 12 : 8);
+          if (score < bestRankScore) {
+            bestRankScore = score;
+            bestRef = { id: sat.id, kind: 'satellite', satNoradId: sat.noradId };
+          }
+        }
+      }
+    }
 
     // 1. Check Solar System bodies (Moon, Sun, Mercury-Neptune)
     if (this.layers.planets) {
@@ -676,6 +825,12 @@ export class SkyEngine {
     const degPerPx = this.fovDeg / Math.max(320, this.viewportHeight);
     const cosAlt = Math.max(0.25, Math.cos(this.altDeg * DEG_TO_RAD));
 
+    if (this.gyro.isEnabled()) {
+      this.gyro.adjustCompassOffset(-(dx * degPerPx) / cosAlt);
+      this.gyro.adjustSimulatedPitch(dy * degPerPx);
+      return;
+    }
+
     this.targetAzDeg = normalizeDeg360(this.targetAzDeg - (dx * degPerPx) / cosAlt);
     this.targetAltDeg = Math.max(-80, Math.min(89.5, this.targetAltDeg + dy * degPerPx));
   };
@@ -773,6 +928,10 @@ export class SkyEngine {
       const azDeg = (((Math.atan2(this.tempPickWorld.x, -this.tempPickWorld.z) * 180) / Math.PI) % 360 + 360) % 360;
       return { azDeg, altDeg };
     }
+    if (ref.kind === 'satellite' && typeof ref.satNoradId === 'number') {
+      const sat = this.satTracker.getSnapshot().satellites.find((s) => s.noradId === ref.satNoradId);
+      return sat ? { azDeg: sat.azDeg, altDeg: sat.altDeg } : null;
+    }
     return null;
   }
 
@@ -799,6 +958,10 @@ export class SkyEngine {
       }
 
       const observedDate = this.refreshAstroState();
+      const selectedSatId = this.getSelectedSatNoradId();
+      this.satTracker.requestUpdate(this.simTimestampMs, this.location, selectedSatId);
+      const satSnap = this.satTracker.getSnapshot();
+
       const lastRad = computeLocalApparentSiderealTimeRad(observedDate, this.location.longitude);
       const ephemeris = this.lastEphemeris;
       const sun: SunTelemetry = {
@@ -810,37 +973,47 @@ export class SkyEngine {
         twilightPhase: classifyTwilight(ephemeris.sun.altDeg),
       };
 
-      // Update tracked target coordinates continuously during time playback/warp
-      if (this.isTrackingObject && this.selectedRef) {
-        const tracked = this.getTrackedAltAz(this.selectedRef, ephemeris);
-        if (tracked) {
-          this.targetAzDeg = normalizeDeg360(tracked.azDeg);
-          this.targetAltDeg = Math.max(-80, Math.min(89.5, tracked.altDeg));
-        }
-      }
-
-      // Smooth quaternion slerp Fly-To or damped camera tracking
       const smooth = 1 - Math.exp(-14 * dtSec);
-      if (this.slerpActive) {
-        this.slerpElapsedSec += dtSec;
-        const u = Math.min(1, this.slerpElapsedSec / this.slerpDurationSec);
-        const eased = 1 - Math.pow(1 - u, 3);
-        const slerped = slerpHorizontalLook(
-          this.slerpStartAzDeg,
-          this.slerpStartAltDeg,
-          this.targetAzDeg,
-          this.targetAltDeg,
-          eased,
-        );
-        this.azDeg = slerped.azDeg;
-        this.altDeg = slerped.altDeg;
-        if (u >= 1) {
-          this.slerpActive = false;
-        }
+      const gyroLook = this.gyro.getSmoothedLook(dtSec);
+      if (gyroLook) {
+        this.slerpActive = false;
+        this.isTrackingObject = false;
+        this.azDeg = gyroLook.azDeg;
+        this.altDeg = gyroLook.altDeg;
+        this.targetAzDeg = gyroLook.azDeg;
+        this.targetAltDeg = gyroLook.altDeg;
       } else {
-        const azDiff = shortestAngleDeltaDeg(this.azDeg, this.targetAzDeg);
-        this.azDeg = normalizeDeg360(this.azDeg + azDiff * smooth);
-        this.altDeg += (this.targetAltDeg - this.altDeg) * smooth;
+        // Update tracked target coordinates continuously during time playback/warp
+        if (this.isTrackingObject && this.selectedRef) {
+          const tracked = this.getTrackedAltAz(this.selectedRef, ephemeris);
+          if (tracked) {
+            this.targetAzDeg = normalizeDeg360(tracked.azDeg);
+            this.targetAltDeg = Math.max(-80, Math.min(89.5, tracked.altDeg));
+          }
+        }
+
+        // Smooth quaternion slerp Fly-To or damped camera tracking
+        if (this.slerpActive) {
+          this.slerpElapsedSec += dtSec;
+          const u = Math.min(1, this.slerpElapsedSec / this.slerpDurationSec);
+          const eased = 1 - Math.pow(1 - u, 3);
+          const slerped = slerpHorizontalLook(
+            this.slerpStartAzDeg,
+            this.slerpStartAltDeg,
+            this.targetAzDeg,
+            this.targetAltDeg,
+            eased,
+          );
+          this.azDeg = slerped.azDeg;
+          this.altDeg = slerped.altDeg;
+          if (u >= 1) {
+            this.slerpActive = false;
+          }
+        } else {
+          const azDiff = shortestAngleDeltaDeg(this.azDeg, this.targetAzDeg);
+          this.azDeg = normalizeDeg360(this.azDeg + azDiff * smooth);
+          this.altDeg += (this.targetAltDeg - this.altDeg) * smooth;
+        }
       }
       this.fovDeg += (this.targetFovDeg - this.fovDeg) * smooth;
 
@@ -889,6 +1062,18 @@ export class SkyEngine {
         showAtmosphere: this.layers.atmosphere,
         visible: this.layers.planets,
       });
+      this.satellitesLayer.update({
+        satellites: satSnap.satellites,
+        issArc: satSnap.issArc,
+        selectedArc: satSnap.selectedArc,
+        selectedNoradId: selectedSatId,
+        elapsedSec,
+        fovDeg: this.fovDeg,
+        viewportWidth: this.viewportWidth,
+        viewportHeight: this.viewportHeight,
+        pixelRatio: dpr,
+        visible: this.layers.satellites,
+      });
       this.constellations.setEqToWorldMatrix(this.eqToWorld);
       this.constellations.setVisibility({
         showLines: this.layers.constellations,
@@ -936,8 +1121,18 @@ export class SkyEngine {
             this.viewportHeight,
             this.fovDeg,
           );
+          const satLabels = this.layers.satellites
+            ? this.satellitesLayer.collectVisibleLabels(
+                this.camera,
+                satSnap.satellites,
+                selectedSatId,
+                this.viewportWidth,
+                this.viewportHeight,
+                this.fovDeg,
+              )
+            : [];
 
-          const allSkyCandidates = [...planetLabels, ...constStarLabels, ...dsoLabels];
+          const allSkyCandidates = [...satLabels, ...planetLabels, ...constStarLabels, ...dsoLabels];
           allSkyCandidates.sort((a, b) => b.priority - a.priority);
           for (const item of allSkyCandidates) {
             const tooClose = mergedSkyLabels.some(
@@ -958,6 +1153,8 @@ export class SkyEngine {
               this.eqToWorld,
               observedDate,
               this.location,
+              satSnap.satellites,
+              satSnap.issPasses,
             )
           : null;
         const selectedReticle = selectedObject
@@ -984,6 +1181,8 @@ export class SkyEngine {
           selectedObject,
           selectedReticle,
           isTrackingObject: this.isTrackingObject,
+          satellites: satSnap,
+          arGyro: this.gyro.getState(),
         });
       }
 
@@ -1003,10 +1202,13 @@ export class SkyEngine {
     this.canvas.removeEventListener('pointercancel', this.onPointerUp);
     this.canvas.removeEventListener('wheel', this.onWheel);
 
+    this.gyro.stop();
+    this.satTracker.dispose();
     this.atmosphere.dispose();
     this.starfield.dispose();
     this.dso.dispose();
     this.solarSystem.dispose();
+    this.satellitesLayer.dispose();
     this.constellations.dispose();
     this.horizon.dispose();
     this.renderer.dispose();

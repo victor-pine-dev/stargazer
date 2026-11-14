@@ -26,6 +26,17 @@ import {
   slerpHorizontalLook,
 } from '../celestialIndex';
 import { DEFAULT_LOCATION } from '../../services/locationService';
+import {
+  computeSatelliteOrbitArc,
+  DEFAULT_SATELLITE_TLES,
+  ISS_NORAD_ID,
+  mergeTleUpdates,
+  parseThreeLineTleText,
+  predictUpcomingPasses,
+  propagateAllSatellites,
+  propagateSatelliteState,
+} from '../satellites';
+import { deviceOrientationToSkyLook } from '../../services/gyroService';
 
 describe('Astronomical Coordinate & Sidereal Math', () => {
   it('converts RA/Dec to orthonormal J2000 unit vectors', () => {
@@ -279,36 +290,37 @@ describe('Solar System Ephemeris & 3D Lunar Phase Math', () => {
   });
 });
 
-describe('Phase 3 Celestial Index, Slerp, Search & Tonight\'s Best Tour', () => {
-  const loadTestCatalog = () => {
-    const binBuf = readFileSync(resolve(process.cwd(), 'public/data/stars.bin'));
-    const binArr = binBuf.buffer.slice(binBuf.byteOffset, binBuf.byteOffset + binBuf.byteLength);
-    const stars = parseStarBinary(binArr);
-    const starNamesRaw = JSON.parse(
-      readFileSync(resolve(process.cwd(), 'public/data/star-names.json'), 'utf8'),
-    ) as Record<string, NamedStarEntry>;
-    const starNames = new Map<number, NamedStarEntry>();
-    for (const entry of Object.values(starNamesRaw)) {
-      starNames.set(entry.hip, entry);
-    }
-    const namedStarList = Object.values(starNamesRaw)
-      .filter((entry) => Boolean(entry.name) && entry.mag <= 3.0)
-      .sort((a, b) => a.mag - b.mag);
-    const constellations = JSON.parse(
-      readFileSync(resolve(process.cwd(), 'public/data/constellations.json'), 'utf8'),
-    ) as ConstellationRecord[];
-    const dsos = JSON.parse(
-      readFileSync(resolve(process.cwd(), 'public/data/dso.json'), 'utf8'),
-    ) as DsoRecord[];
+function loadTestCatalog() {
+  const binBuf = readFileSync(resolve(process.cwd(), 'public/data/stars.bin'));
+  const binArr = binBuf.buffer.slice(binBuf.byteOffset, binBuf.byteOffset + binBuf.byteLength);
+  const stars = parseStarBinary(binArr);
+  const starNamesRaw = JSON.parse(
+    readFileSync(resolve(process.cwd(), 'public/data/star-names.json'), 'utf8'),
+  ) as Record<string, NamedStarEntry>;
+  const starNames = new Map<number, NamedStarEntry>();
+  for (const entry of Object.values(starNamesRaw)) {
+    starNames.set(entry.hip, entry);
+  }
+  const namedStarList = Object.values(starNamesRaw)
+    .filter((entry) => Boolean(entry.name) && entry.mag <= 3.0)
+    .sort((a, b) => a.mag - b.mag);
+  const constellations = JSON.parse(
+    readFileSync(resolve(process.cwd(), 'public/data/constellations.json'), 'utf8'),
+  ) as ConstellationRecord[];
+  const dsos = JSON.parse(
+    readFileSync(resolve(process.cwd(), 'public/data/dso.json'), 'utf8'),
+  ) as DsoRecord[];
 
-    return {
-      stars,
-      starNames,
-      namedStarList,
-      constellations,
-      dsos,
-    };
+  return {
+    stars,
+    starNames,
+    namedStarList,
+    constellations,
+    dsos,
   };
+}
+
+describe('Phase 3 Celestial Index, Slerp, Search & Tonight\'s Best Tour', () => {
 
   it('computes spectral classifications and stellar/DSO distance labels', () => {
     expect(bvToSpectralClass(0.0, 32349)).toMatch(/^A1V · /);
@@ -464,5 +476,170 @@ describe('Phase 3 Celestial Index, Slerp, Search & Tonight\'s Best Tour', () => 
       expect(stop.stepIndex).toBe(index);
       expect(stop.altDeg).toBeGreaterThanOrEqual(8);
     });
+  });
+});
+
+describe('Phase 4 Live Satellites, Pass Prediction & AR Gyro Fusion', () => {
+  const nycLocation = {
+    ...DEFAULT_LOCATION,
+    name: 'New York City',
+    latitude: 40.7128,
+    longitude: -74.006,
+    elevation: 10,
+  };
+
+  it('parses 3-line CelesTrak TLE text and merges NORAD updates cleanly', () => {
+    const sampleTle = [
+      'ISS (ZARYA)',
+      '1 25544U 98067A   26318.50000000  .00015000  00000-0  26000-3 0  9991',
+      '2 25544  51.6312 200.0000 0007500 100.0000 250.0000 15.50200000400005',
+      'TIANGONG',
+      '1 48274U 21035A   26318.40000000  .00018000  00000-0  19000-3 0  9992',
+      '2 48274  41.4712 180.0000 0004500 120.0000 240.0000 15.61000000250003',
+    ].join('\n');
+
+    const parsed = parseThreeLineTleText(sampleTle);
+    expect(parsed.size).toBe(2);
+    expect(parsed.get(ISS_NORAD_ID)?.name).toBe('ISS (ZARYA)');
+    expect(parsed.get(48274)?.name).toBe('TIANGONG');
+
+    const merged = mergeTleUpdates(DEFAULT_SATELLITE_TLES, sampleTle);
+    expect(merged.updatedCount).toBe(2);
+    expect(merged.records.length).toBe(DEFAULT_SATELLITE_TLES.length);
+    const updatedIss = merged.records.find((r) => r.noradId === ISS_NORAD_ID);
+    expect(updatedIss?.line1).toContain('26318.50000000');
+  });
+
+  it('propagates ISS, Tiangong & HST with realistic LEO physics and unit sky vectors', () => {
+    const testDate = new Date('2026-11-14T21:25:00Z');
+    const targetIds = [ISS_NORAD_ID, 48274, 20580];
+
+    for (const noradId of targetIds) {
+      const record = DEFAULT_SATELLITE_TLES.find((r) => r.noradId === noradId);
+      expect(record).toBeDefined();
+      const state = propagateSatelliteState(record!, testDate, nycLocation);
+      expect(state).not.toBeNull();
+      expect(Number.isFinite(state!.altDeg)).toBe(true);
+      expect(Number.isFinite(state!.azDeg)).toBe(true);
+      expect(state!.altitudeKm).toBeGreaterThanOrEqual(350);
+      expect(state!.altitudeKm).toBeLessThanOrEqual(600);
+      expect(state!.speedKmS).toBeGreaterThanOrEqual(7.4);
+      expect(state!.speedKmS).toBeLessThanOrEqual(7.9);
+      expect(state!.subLatDeg).toBeGreaterThanOrEqual(-90);
+      expect(state!.subLatDeg).toBeLessThanOrEqual(90);
+      expect(state!.subLonDeg).toBeGreaterThanOrEqual(-180);
+      expect(state!.subLonDeg).toBeLessThanOrEqual(180);
+
+      const norm = Math.hypot(state!.worldDir[0], state!.worldDir[1], state!.worldDir[2]);
+      expect(norm).toBeCloseTo(1, 5);
+    }
+
+    const all = propagateAllSatellites(DEFAULT_SATELLITE_TLES, testDate, nycLocation);
+    expect(all.length).toBe(DEFAULT_SATELLITE_TLES.length);
+  });
+
+  it('computes ISS orbital trajectory arcs and upcoming local pass predictions', () => {
+    const issRecord = DEFAULT_SATELLITE_TLES.find((r) => r.noradId === ISS_NORAD_ID)!;
+    const centerDate = new Date('2026-11-14T21:25:00Z');
+    const arc = computeSatelliteOrbitArc(issRecord, centerDate, nycLocation, 30, 60);
+
+    expect(arc.length).toBeGreaterThan(20);
+    for (const pt of arc) {
+      const len = Math.hypot(pt.worldDir[0], pt.worldDir[1], pt.worldDir[2]);
+      expect(len).toBeCloseTo(1, 5);
+    }
+
+    const passes = predictUpcomingPasses(issRecord, centerDate, nycLocation, {
+      hoursAhead: 48,
+      stepSec: 20,
+      minPeakAltDeg: 10,
+      maxPasses: 5,
+    });
+    expect(passes.length).toBeGreaterThan(0);
+
+    for (const pass of passes) {
+      expect(pass.maxAltDeg).toBeGreaterThanOrEqual(10);
+      expect(pass.startTimeMs).toBeLessThan(pass.maxTimeMs);
+      expect(pass.maxTimeMs).toBeLessThan(pass.endTimeMs);
+      expect(pass.durationSec).toBeGreaterThan(30);
+    }
+  });
+
+  it('supports satellite search queries and inspector telemetry lookup', () => {
+    const catalog = loadTestCatalog();
+    const date = new Date('2026-11-14T21:25:00Z');
+    const ephemeris = computeSolarSystemEphemeris(date, nycLocation.latitude, nycLocation.longitude);
+    const eqToWorld = computeEquatorialToWorldMatrix4(date, nycLocation.latitude, nycLocation.longitude);
+    const satellites = propagateAllSatellites(DEFAULT_SATELLITE_TLES, date, nycLocation);
+    const issRecord = DEFAULT_SATELLITE_TLES.find((r) => r.noradId === ISS_NORAD_ID)!;
+    const issPasses = predictUpcomingPasses(issRecord, date, nycLocation, {
+      hoursAhead: 48,
+      maxPasses: 4,
+    });
+
+    const byName = searchCelestialCatalog('ISS', 'satellite', catalog, ephemeris, eqToWorld, 10, satellites);
+    expect(byName[0]?.ref.satNoradId).toBe(ISS_NORAD_ID);
+
+    const byNorad = searchCelestialCatalog('25544', 'all', catalog, ephemeris, eqToWorld, 10, satellites);
+    expect(byNorad.some((item) => item.kind === 'satellite' && item.ref.satNoradId === ISS_NORAD_ID)).toBe(true);
+
+    const byHubble = searchCelestialCatalog('Hubble', 'satellite', catalog, ephemeris, eqToWorld, 10, satellites);
+    expect(byHubble.some((item) => item.ref.satNoradId === 20580)).toBe(true);
+
+    const telemetry = computeObjectTelemetry(
+      { id: 'sat-25544', kind: 'satellite', satNoradId: ISS_NORAD_ID },
+      catalog,
+      ephemeris,
+      eqToWorld,
+      date,
+      nycLocation,
+      satellites,
+      issPasses,
+    );
+    expect(telemetry).not.toBeNull();
+    expect(telemetry?.kind).toBe('satellite');
+    expect(telemetry?.name).toContain('ISS');
+    expect(telemetry?.spectralOrMorphology).toContain('km/s');
+    expect(telemetry?.description).toContain('Ground track:');
+  });
+
+  it('fuses DeviceOrientation Euler angles into accurate Alt/Az sky look directions', () => {
+    const north = deviceOrientationToSkyLook(0, 90, 0, 0);
+    expect(north.azDeg).toBeCloseTo(0, 2);
+    expect(north.altDeg).toBeCloseTo(0, 2);
+
+    const east = deviceOrientationToSkyLook(270, 90, 0, 0);
+    expect(east.azDeg).toBeCloseTo(90, 2);
+    expect(east.altDeg).toBeCloseTo(0, 2);
+
+    const south = deviceOrientationToSkyLook(180, 90, 0, 0);
+    expect(south.azDeg).toBeCloseTo(180, 2);
+    expect(south.altDeg).toBeCloseTo(0, 2);
+
+    const west = deviceOrientationToSkyLook(90, 90, 0, 0);
+    expect(west.azDeg).toBeCloseTo(270, 2);
+    expect(west.altDeg).toBeCloseTo(0, 2);
+
+    const tiltedUp45 = deviceOrientationToSkyLook(180, 135, 0, 0);
+    expect(tiltedUp45.azDeg).toBeCloseTo(180, 2);
+    expect(tiltedUp45.altDeg).toBeCloseTo(45, 2);
+
+    const zenith = deviceOrientationToSkyLook(0, 180, 0, 0);
+    expect(zenith.altDeg).toBeCloseTo(89.5, 2);
+
+    const nadir = deviceOrientationToSkyLook(0, 0, 0, 0);
+    expect(nadir.altDeg).toBeCloseTo(-80, 2);
+
+    const iosCompass = deviceOrientationToSkyLook(0, 90, 0, 0, 90);
+    expect(iosCompass.azDeg).toBeCloseTo(90, 2);
+    expect(iosCompass.altDeg).toBeCloseTo(0, 2);
+
+    const trimmed = deviceOrientationToSkyLook(0, 90, 0, 0, 90, -15);
+    expect(trimmed.azDeg).toBeCloseTo(75, 2);
+
+    // Landscape-left (+90° screen rotation) upright pointing East
+    const landscapeEast = deviceOrientationToSkyLook(0, 0, -90, 90);
+    expect(landscapeEast.azDeg).toBeCloseTo(90, 2);
+    expect(landscapeEast.altDeg).toBeCloseTo(0, 2);
   });
 });

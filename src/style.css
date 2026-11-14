@@ -1,6 +1,7 @@
 :root {
   color-scheme: dark;
   accent-color: var(--accent);
+  --target-size: 24px;
   --bg-deep: #030712;
   --glass-bg: rgba(8, 13, 28, 0.68);
   --glass-bg-hover: rgba(15, 24, 48, 0.82);
@@ -15,6 +16,12 @@
   --emerald: #34d399;
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@media (pointer: coarse) {
+  :root {
+    --target-size: 44px;
+  }
 }
 
 *,
@@ -34,6 +41,33 @@ body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   user-select: none;
+}
+
+body {
+  overflow-wrap: anywhere;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+
+p,
+li {
+  text-wrap: pretty;
+}
+
+:where(
+  button,
+  select,
+  textarea,
+  input:not([type='checkbox'], [type='radio']),
+  [role='button'],
+  nav a
+) {
+  min-block-size: var(--target-size);
+  min-inline-size: var(--target-size);
 }
 
 #app {
@@ -100,6 +134,15 @@ body {
   font-weight: 500;
   letter-spacing: 0.03em;
   color: rgba(196, 181, 253, 0.86);
+}
+
+.sky-label-satellite {
+  transform: translate(0, -50%);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgba(110, 231, 183, 0.96);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
 }
 
 .sky-label-compass {
@@ -195,8 +238,8 @@ body {
 .hud-top,
 .hud-bottom {
   position: fixed;
-  left: 14px;
-  right: 14px;
+  left: max(14px, env(safe-area-inset-left));
+  right: max(14px, env(safe-area-inset-right));
   z-index: 20;
   display: flex;
   flex-wrap: wrap;
@@ -207,11 +250,11 @@ body {
 }
 
 .hud-top {
-  top: 14px;
+  top: max(14px, env(safe-area-inset-top));
 }
 
 .hud-bottom {
-  bottom: 14px;
+  bottom: max(14px, env(safe-area-inset-bottom));
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
@@ -565,8 +608,9 @@ input:not(input[type="range"]):user-invalid {
 }
 
 .icon-btn {
-  width: 28px;
-  height: 28px;
+  min-inline-size: 28px;
+  min-block-size: 28px;
+  padding: 2px 6px;
   display: grid;
   place-items: center;
   border-radius: 8px;
@@ -832,11 +876,19 @@ dialog::backdrop {
   display: none !important;
 }
 
-/* Header Action Pills (Search & Tonight's Best) */
+/* Header Action Pills (Search, Tonight's Best, ISS & AR Gyro) */
 .hud-actions-group {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.chip-btn[aria-pressed='true'],
+.action-pill[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: var(--glass-border-strong);
+  color: var(--text-primary);
 }
 
 .action-pill {
@@ -932,33 +984,145 @@ dialog::backdrop {
   }
 }
 
-/* Floating Side Panels: Object Inspector & Tonight's Best Tour */
+/* Floating Side Panels: Object Inspector, Tonight's Best Tour & ISS Satellites */
 .inspect-card,
-.tour-panel {
+.tour-panel,
+.iss-panel {
   position: fixed;
-  top: 96px;
+  top: max(96px, calc(82px + env(safe-area-inset-top)));
   z-index: 25;
   padding: 14px;
   flex-direction: column;
   gap: 11px;
-  max-height: calc(100dvh - 240px);
+  max-height: calc(100dvh - 240px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
   overflow-y: auto;
   user-select: text;
 }
 
 .inspect-card:not([hidden]),
-.tour-panel:not([hidden]) {
+.tour-panel:not([hidden]),
+.iss-panel:not([hidden]) {
   display: flex;
 }
 
 .inspect-card {
-  right: 14px;
-  width: min(344px, calc(100vw - 28px));
+  right: max(14px, env(safe-area-inset-right));
+  width: min(344px, calc(100vw - 28px - env(safe-area-inset-left) - env(safe-area-inset-right)));
 }
 
-.tour-panel {
-  left: 14px;
-  width: min(340px, calc(100vw - 28px));
+.tour-panel,
+.iss-panel {
+  left: max(14px, env(safe-area-inset-left));
+  width: min(352px, calc(100vw - 28px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+}
+
+/* Mobile AR Gyroscope HUD Banner */
+.ar-hud-banner {
+  position: fixed;
+  top: max(82px, calc(76px + env(safe-area-inset-top)));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 26;
+  width: min(580px, calc(100vw - 28px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+  padding: 8px 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.ar-hud-banner:not([hidden]) {
+  display: flex;
+}
+
+.ar-hud-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.ar-status-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ar-heading-readout {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.ar-hud-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ISS & Live Satellites Drawer */
+.iss-live-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  background: rgba(15, 23, 42, 0.56);
+}
+
+.iss-live-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.iss-live-header > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.iss-live-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.iss-live-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.iss-live-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.iss-live-actions > button {
+  flex: 1 1 110px;
+}
+
+.iss-section-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#iss-panel .field-label {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
 
 .side-panel-header {
@@ -1218,10 +1382,15 @@ dialog::backdrop {
     justify-content: space-between;
   }
 
+  .ar-hud-banner {
+    top: max(154px, calc(146px + env(safe-area-inset-top)));
+  }
+
   .inspect-card,
-  .tour-panel {
-    top: 158px;
-    max-height: calc(100dvh - 320px);
+  .tour-panel,
+  .iss-panel {
+    top: max(158px, calc(150px + env(safe-area-inset-top)));
+    max-height: calc(100dvh - 320px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
   }
 }
 
@@ -1232,26 +1401,33 @@ dialog::backdrop {
 
   .hud-top,
   .hud-bottom {
-    left: 8px;
-    right: 8px;
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
     gap: 8px;
   }
 
   .hud-top {
-    top: 8px;
+    top: max(8px, env(safe-area-inset-top));
   }
 
   .hud-bottom {
-    bottom: 8px;
+    bottom: max(8px, env(safe-area-inset-bottom));
+  }
+
+  .ar-hud-banner {
+    top: max(172px, calc(164px + env(safe-area-inset-top)));
+    width: calc(100vw - 16px - env(safe-area-inset-left) - env(safe-area-inset-right));
+    padding: 8px 10px;
   }
 
   .inspect-card,
-  .tour-panel {
-    left: 8px;
-    right: 8px;
+  .tour-panel,
+  .iss-panel {
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
     width: auto;
     top: auto;
-    bottom: 185px;
+    bottom: max(185px, calc(185px + env(safe-area-inset-bottom)));
     max-height: 44dvh;
   }
 }

@@ -28,9 +28,13 @@ import {
   type SolarSystemBodyState,
   type SolarSystemEphemeris,
 } from './solarSystem';
+import type {
+  SatellitePassPrediction,
+  SatelliteTelemetryState,
+} from './satellites';
 import { bvToKelvin, bvToRGB, computeAirmass } from './spectral';
 
-export type CelestialObjectKind = 'planet' | 'star' | 'dso' | 'constellation';
+export type CelestialObjectKind = 'planet' | 'star' | 'dso' | 'constellation' | 'satellite';
 
 export interface CelestialObjectRef {
   id: string;
@@ -40,6 +44,7 @@ export interface CelestialObjectRef {
   bodyId?: SolarSystemBodyId;
   dsoId?: string;
   constellationId?: string;
+  satNoradId?: number;
 }
 
 export interface RiseTransitSetTimes {
@@ -601,7 +606,7 @@ function formatStarDisplayTitle(
 }
 
 /**
- * Computes full live inspection telemetry for any star, planet/Moon/Sun, DSO, or constellation.
+ * Computes full live inspection telemetry for any star, planet/Moon/Sun, DSO, constellation, or satellite.
  */
 export function computeObjectTelemetry(
   ref: CelestialObjectRef,
@@ -610,6 +615,8 @@ export function computeObjectTelemetry(
   eqToWorld: THREE.Matrix4,
   date: Date,
   location: ObserverLocation,
+  satellites: SatelliteTelemetryState[] = [],
+  issPasses: SatellitePassPrediction[] = [],
 ): InspectedObjectTelemetry | null {
   if (ref.kind === 'planet' && ref.bodyId) {
     const body = getSolarSystemBody(ref.bodyId, ephemeris);
@@ -822,6 +829,62 @@ export function computeObjectTelemetry(
     };
   }
 
+  if (ref.kind === 'satellite' && typeof ref.satNoradId === 'number') {
+    const sat = satellites.find((s) => s.noradId === ref.satNoradId);
+    if (!sat) return null;
+
+    const matchingPass =
+      sat.noradId === 25544
+        ? issPasses.find((p) => p.endTimeMs >= date.getTime()) ?? issPasses[0]
+        : undefined;
+
+    const rts: RiseTransitSetTimes = matchingPass
+      ? {
+          rise: formatClockHHMM(new Date(matchingPass.startTimeMs)),
+          transit: formatClockHHMM(new Date(matchingPass.maxTimeMs)),
+          transitAltDeg: matchingPass.maxAltDeg,
+          set: formatClockHHMM(new Date(matchingPass.endTimeMs)),
+          state: 'normal',
+        }
+      : {
+          rise: sat.isAboveHorizon ? 'In Pass' : 'Next Pass',
+          transit: 'LEO ~92m',
+          transitAltDeg: Math.max(0, sat.altDeg),
+          set: sat.isAboveHorizon ? 'In Pass' : '—',
+          state: 'normal',
+        };
+
+    const latLabel = `${Math.abs(sat.subLatDeg).toFixed(1)}°${sat.subLatDeg >= 0 ? 'N' : 'S'}`;
+    const lonLabel = `${Math.abs(sat.subLonDeg).toFixed(1)}°${sat.subLonDeg >= 0 ? 'E' : 'W'}`;
+
+    return {
+      ref,
+      id: sat.id,
+      kind: 'satellite',
+      name: sat.name,
+      subtitle: `${sat.category} · NORAD ${sat.noradId} · ${sat.isSunlit ? 'Sunlit' : 'In Earth Shadow'}`,
+      categoryLabel: sat.category,
+      altDeg: sat.altDeg,
+      azDeg: sat.azDeg,
+      azCardinal: sat.azCardinal,
+      raRad: sat.raRad,
+      decRad: sat.decRad,
+      raFormatted: formatHMS(sat.raRad, true),
+      decFormatted: formatDMS(sat.decRad * RAD_TO_DEG),
+      vmag: sat.vmag,
+      vmagFormatted: `${sat.vmag >= 0 ? '+' : ''}${sat.vmag.toFixed(1)}`,
+      distanceLabel: `${formatNumberedCount(sat.rangeKm)} km`,
+      spectralOrMorphology: `Alt ${formatNumberedCount(sat.altitudeKm)} km · ${sat.speedKmS.toFixed(2)} km/s`,
+      spectralColorHex: sat.colorHex,
+      airmass: sat.altDeg > 0 ? computeAirmass(sat.altDeg) : null,
+      rts,
+      isAboveHorizon: sat.isAboveHorizon,
+      description: `${sat.description} Ground track: ${latLabel}, ${lonLabel}.`,
+      recommendedFovDeg: sat.noradId === 25544 ? 32 : 36,
+      worldDir: sat.worldDir,
+    };
+  }
+
   return null;
 }
 
@@ -845,7 +908,7 @@ function matchQueryScore(query: string, fields: string[], bonus = 0): number {
 }
 
 /**
- * Instant search across planets, Sun/Moon, Hipparcos stars, Messier/Caldwell DSOs, and 88 IAU constellations.
+ * Instant search across planets, Sun/Moon, Hipparcos stars, Messier/Caldwell DSOs, constellations, and satellites.
  */
 export function searchCelestialCatalog(
   query: string,
@@ -854,10 +917,37 @@ export function searchCelestialCatalog(
   ephemeris: SolarSystemEphemeris,
   eqToWorld: THREE.Matrix4,
   maxResults = 32,
+  satellites: SatelliteTelemetryState[] = [],
 ): SearchResultItem[] {
   const q = query.trim().toLowerCase();
   const results: SearchResultItem[] = [];
   const constMap = getConstellationMap(catalog);
+
+  // 0. Live Satellites & Space Stations
+  if (filterKind === 'all' || filterKind === 'satellite') {
+    for (const sat of satellites) {
+      const match = matchQueryScore(
+        q,
+        [sat.name, sat.shortName, String(sat.noradId), `NORAD ${sat.noradId}`, sat.category],
+        (sat.isAboveHorizon ? 20 : 0) + (sat.noradId === 25544 ? 16 : 6),
+      );
+      if (match > 0) {
+        results.push({
+          ref: { id: sat.id, kind: 'satellite', satNoradId: sat.noradId },
+          id: sat.id,
+          kind: 'satellite',
+          name: sat.name,
+          subtitle: `NORAD ${sat.noradId} · ${Math.round(sat.altitudeKm)} km · ${sat.isSunlit ? 'Sunlit' : 'Shadowed'}`,
+          categoryBadge: sat.category,
+          vmag: sat.vmag,
+          altDeg: sat.altDeg,
+          azCardinal: sat.azCardinal,
+          isAboveHorizon: sat.isAboveHorizon,
+          score: match,
+        });
+      }
+    }
+  }
 
   // 1. Solar System bodies (Moon, Sun, Mercury..Neptune)
   if (filterKind === 'all' || filterKind === 'planet') {

@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#050814" />
     <title>Stargazer — Live GPU Sky Observatory</title>
   </head>
@@ -58,7 +58,7 @@
           <span class="location-caret" aria-hidden="true">▾</span>
         </button>
 
-        <div class="hud-actions-group" role="group" aria-label="Catalog search and sky tour">
+        <div class="hud-actions-group" role="group" aria-label="Catalog search, sky tour, satellites, and AR mode">
           <button
             id="search-trigger-btn"
             type="button"
@@ -80,6 +80,26 @@
           >
             <span class="action-pill-icon" aria-hidden="true">✦</span>
             <span>Tonight's Best</span>
+          </button>
+          <button
+            id="iss-toggle-btn"
+            type="button"
+            class="hud-panel action-pill"
+            aria-expanded="false"
+            aria-controls="iss-panel"
+          >
+            <span class="action-pill-icon" aria-hidden="true">🛰</span>
+            <span>ISS &amp; Passes</span>
+          </button>
+          <button
+            id="ar-gyro-btn"
+            type="button"
+            class="hud-panel action-pill"
+            aria-pressed="false"
+            aria-label="Toggle Mobile AR Gyroscope Sky Tracking"
+          >
+            <span class="action-pill-icon" aria-hidden="true">⌖</span>
+            <span>AR Gyro</span>
           </button>
         </div>
 
@@ -110,6 +130,21 @@
         </div>
       </header>
 
+      <!-- AR Gyroscope Compass & Horizon Alignment Banner -->
+      <section id="ar-hud-banner" class="hud-panel ar-hud-banner" aria-live="polite" hidden>
+        <div class="ar-hud-status">
+          <span id="ar-status-badge" class="badge badge-gpu">AR GYRO</span>
+          <span id="ar-status-text" class="ar-status-text">Aligning sensors…</span>
+          <span id="ar-heading-readout" class="ar-heading-readout mono">HDG 180° · ALT +32°</span>
+        </div>
+        <div class="ar-hud-controls" role="group" aria-label="AR compass calibration trim">
+          <button id="ar-trim-left" type="button" class="chip-btn" aria-label="Trim compass heading minus 5 degrees">−5°</button>
+          <button id="ar-trim-reset" type="button" class="chip-btn" aria-label="Reset compass trim">Reset</button>
+          <button id="ar-trim-right" type="button" class="chip-btn" aria-label="Trim compass heading plus 5 degrees">+5°</button>
+          <button id="ar-exit-btn" type="button" class="chip-btn is-active" aria-label="Exit AR gyroscope mode">Exit AR</button>
+        </div>
+      </section>
+
       <!-- "Tonight's Best" Guided Sky Tour Drawer -->
       <aside id="tour-panel" class="hud-panel tour-panel" aria-labelledby="tour-panel-title" hidden>
         <header class="side-panel-header">
@@ -134,6 +169,52 @@
         </div>
 
         <ol id="tour-stop-list" class="tour-stop-list" role="list"></ol>
+      </aside>
+
+      <!-- Live ISS & Satellites Drawer -->
+      <aside id="iss-panel" class="hud-panel iss-panel" aria-labelledby="iss-panel-title" hidden>
+        <header class="side-panel-header">
+          <div>
+            <h2 id="iss-panel-title" class="side-panel-title">ISS &amp; Live Satellites</h2>
+            <p id="iss-tle-source" class="side-panel-subtitle">SGP4 Worker · Loading CelesTrak TLEs…</p>
+          </div>
+          <button
+            id="iss-close-btn"
+            type="button"
+            class="dialog-close"
+            aria-label="Close ISS and satellites drawer"
+          >
+            ✕
+          </button>
+        </header>
+
+        <section class="iss-live-card" aria-label="Live International Space Station Telemetry">
+          <div class="iss-live-header">
+            <div>
+              <span class="badge badge-gpu">NORAD 25544</span>
+              <strong class="iss-live-name">ISS (ZARYA)</strong>
+            </div>
+            <span id="iss-sunlit-badge" class="badge badge-subtle">SUNLIT</span>
+          </div>
+          <div class="iss-live-metrics mono">
+            <span id="iss-live-altaz">ALT — · AZ —</span>
+            <span id="iss-live-orbit">Orbit — km · — km/s</span>
+          </div>
+          <div class="iss-live-actions">
+            <button id="iss-track-btn" type="button" class="primary-btn">Track ISS</button>
+            <button id="iss-refresh-btn" type="button" class="secondary-btn">Refresh TLEs</button>
+          </div>
+        </section>
+
+        <div class="iss-section-block">
+          <h3 class="field-label">Upcoming Local ISS Passes (≥ 10°)</h3>
+          <ol id="iss-pass-list" class="tour-stop-list" role="list"></ol>
+        </div>
+
+        <div class="iss-section-block">
+          <h3 class="field-label">Tracked Visual Satellites</h3>
+          <ul id="sat-catalog-list" class="tour-stop-list" role="list"></ul>
+        </div>
       </aside>
 
       <!-- Click-to-Inspect Live Telemetry Card -->
@@ -282,6 +363,7 @@
 
           <div class="hud-panel layers-panel" role="group" aria-label="Celestial display layers">
             <button type="button" class="chip-btn is-active" data-layer="planets" aria-pressed="true">Planets</button>
+            <button type="button" class="chip-btn is-active" data-layer="satellites" aria-pressed="true">Satellites</button>
             <button type="button" class="chip-btn is-active" data-layer="dso" aria-pressed="true">Deep Sky</button>
             <button type="button" class="chip-btn is-active" data-layer="constellations" aria-pressed="true">Constellations</button>
             <button type="button" class="chip-btn" data-layer="boundaries" aria-pressed="false">Boundaries</button>
@@ -385,13 +467,14 @@
             id="celestial-search-input"
             type="search"
             class="text-input"
-            placeholder="Search Sirius, Saturn, M31, Orion, Pleiades, HIP 32349…"
+            placeholder="Search Sirius, ISS, Saturn, M31, Orion, Hubble, HIP 32349…"
             autocomplete="off"
             autofocus
           />
           <div class="search-filter-row" role="group" aria-label="Filter catalog results by object category">
             <button type="button" class="chip-btn is-active" data-search-filter="all" aria-pressed="true">All</button>
             <button type="button" class="chip-btn" data-search-filter="planet" aria-pressed="false">Planets</button>
+            <button type="button" class="chip-btn" data-search-filter="satellite" aria-pressed="false">Satellites</button>
             <button type="button" class="chip-btn" data-search-filter="star" aria-pressed="false">Stars</button>
             <button type="button" class="chip-btn" data-search-filter="dso" aria-pressed="false">Deep Sky</button>
             <button type="button" class="chip-btn" data-search-filter="constellation" aria-pressed="false">Constellations</button>
