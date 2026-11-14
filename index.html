@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#050814" />
+    <title>Stargazer — Live GPU Sky Observatory</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="sky-canvas" aria-label="Interactive GPU celestial sky viewport"></canvas>
+
+      <!-- Projected constellation, star, and compass labels -->
+      <div id="sky-labels-layer" aria-hidden="true"></div>
+
+      <!-- Loading overlay while stars.bin and WebGPU/WebGL2 initialize -->
+      <div id="loading-overlay" role="status" aria-live="polite">
+        <div class="loading-card">
+          <div class="loading-spinner" aria-hidden="true"></div>
+          <p class="loading-title">Initializing GPU Sky Observatory</p>
+          <p id="loading-detail" class="loading-detail">Loading Hipparcos star catalog &amp; IAU constellations…</p>
+        </div>
+      </div>
+
+      <!-- Top HUD Bar -->
+      <header class="hud-top">
+        <div class="hud-panel brand-panel">
+          <div class="brand-title-row">
+            <span class="brand-dot" aria-hidden="true"></span>
+            <h1 class="brand-name">STARGAZER</h1>
+            <span id="gpu-badge" class="badge badge-gpu">Initializing…</span>
+          </div>
+          <div class="brand-metrics">
+            <span id="star-count-label">— stars</span>
+            <span aria-hidden="true">·</span>
+            <span id="fps-label">— FPS</span>
+          </div>
+        </div>
+
+        <button
+          id="location-trigger"
+          type="button"
+          class="hud-panel location-pill"
+          command="show-modal"
+          commandfor="location-dialog"
+          aria-label="Change observer geographic location"
+        >
+          <span class="location-icon" aria-hidden="true">◎</span>
+          <span class="location-meta">
+            <span class="location-name-row">
+              <span id="location-name">Locating…</span>
+              <span id="location-source-badge" class="badge badge-subtle">INIT</span>
+            </span>
+            <span id="location-coords" class="location-coords">—</span>
+          </span>
+          <span class="location-caret" aria-hidden="true">▾</span>
+        </button>
+
+        <div class="hud-panel telemetry-panel">
+          <div class="telemetry-row">
+            <div class="metric-cell">
+              <span class="metric-label">LOCAL / UTC</span>
+              <span id="clock-readout" class="metric-value mono">--:--:--</span>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">SIDEREAL (LAST)</span>
+              <span id="last-readout" class="metric-value mono">--h --m --s</span>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">SOLAR STATE</span>
+              <span id="sun-readout" class="metric-value">—</span>
+            </div>
+          </div>
+          <div class="time-mode-group" role="group" aria-label="Sky simulation time mode">
+            <button type="button" class="chip-btn is-active" data-time-mode="live">Live Now</button>
+            <button type="button" class="chip-btn" data-time-mode="sunset">Sunset</button>
+            <button type="button" class="chip-btn" data-time-mode="tonight">Tonight 22:30</button>
+          </div>
+        </div>
+      </header>
+
+      <!-- Bottom Control Dock -->
+      <footer class="hud-bottom">
+        <div class="hud-panel look-panel">
+          <div class="look-readout">
+            <span><abbr title="Azimuth">AZ</abbr> <strong id="az-readout" class="mono">180.0° S</strong></span>
+            <span><abbr title="Altitude">ALT</abbr> <strong id="alt-readout" class="mono">+32.0°</strong></span>
+            <span><abbr title="Field of View">FOV</abbr> <strong id="fov-readout" class="mono">72°</strong></span>
+          </div>
+          <div class="zoom-controls" role="group" aria-label="Field of view zoom">
+            <button id="zoom-in-btn" type="button" class="icon-btn" title="Zoom in (narrow FOV)" aria-label="Zoom in">+</button>
+            <button id="zoom-out-btn" type="button" class="icon-btn" title="Zoom out (wide FOV)" aria-label="Zoom out">−</button>
+          </div>
+        </div>
+
+        <nav class="hud-panel compass-nav" aria-label="Quick sky orientation">
+          <button type="button" class="chip-btn" data-look-az="0" data-look-alt="25">N</button>
+          <button type="button" class="chip-btn" data-look-az="90" data-look-alt="25">E</button>
+          <button type="button" class="chip-btn" data-look-az="180" data-look-alt="25">S</button>
+          <button type="button" class="chip-btn" data-look-az="270" data-look-alt="25">W</button>
+          <button type="button" class="chip-btn" data-look-az="180" data-look-alt="89">Zenith</button>
+        </nav>
+
+        <div class="hud-panel layers-panel" role="group" aria-label="Celestial display layers">
+          <button type="button" class="chip-btn is-active" data-layer="constellations" aria-pressed="true">Constellations</button>
+          <button type="button" class="chip-btn" data-layer="boundaries" aria-pressed="false">Boundaries</button>
+          <button type="button" class="chip-btn is-active" data-layer="labels" aria-pressed="true">Labels</button>
+          <button type="button" class="chip-btn is-active" data-layer="atmosphere" aria-pressed="true">Atmosphere</button>
+          <button type="button" class="chip-btn is-active" data-layer="horizon" aria-pressed="true">Horizon</button>
+        </div>
+      </footer>
+    </div>
+
+    <!-- Native Modal Location Picker (modern-web-guidance compliant) -->
+    <dialog id="location-dialog" closedby="any" aria-labelledby="location-dialog-title">
+      <div class="dialog-shell">
+        <header class="dialog-header">
+          <div>
+            <h2 id="location-dialog-title">Observer Location</h2>
+            <p class="dialog-subtitle">Anchor sidereal rotation and atmospheric twilight to any point on Earth.</p>
+          </div>
+          <button
+            type="button"
+            class="dialog-close"
+            command="close"
+            commandfor="location-dialog"
+            aria-label="Close location picker"
+          >
+            ✕
+          </button>
+        </header>
+
+        <div class="dialog-gps-row">
+          <button id="gps-detect-btn" type="button" class="primary-btn">
+            <span aria-hidden="true">⌖</span> Detect My GPS Location
+          </button>
+          <p id="gps-status-msg" class="gps-status" role="status"></p>
+        </div>
+
+        <section class="dialog-section" aria-label="Search cities and dark-sky observatories">
+          <label for="location-search-input" class="field-label">Search Cities &amp; Dark-Sky Observatories</label>
+          <input
+            id="location-search-input"
+            type="search"
+            class="text-input"
+            placeholder="Search e.g. Mauna Kea, Atacama, Tokyo, Reykjavik…"
+            autocomplete="off"
+            autofocus
+          />
+          <ul id="location-preset-list" class="preset-list" role="listbox" aria-label="Preset observation sites"></ul>
+        </section>
+
+        <form id="custom-coords-form" class="dialog-section custom-coords-form">
+          <p class="field-label">Or Enter Custom Coordinates</p>
+          <div class="coords-grid">
+            <label class="coord-field">
+              <span>Site Label</span>
+              <input id="custom-name" type="text" class="text-input" placeholder="Backyard Deck" maxlength="48" />
+            </label>
+            <label class="coord-field">
+              <span>Latitude (°)</span>
+              <input id="custom-lat" type="number" step="0.0001" min="-90" max="90" class="text-input mono" required />
+            </label>
+            <label class="coord-field">
+              <span>Longitude (°)</span>
+              <input id="custom-lon" type="number" step="0.0001" min="-180" max="180" class="text-input mono" required />
+            </label>
+            <label class="coord-field">
+              <span>Elevation (m)</span>
+              <input id="custom-elev" type="number" step="1" min="-100" max="9000" class="text-input mono" value="0" />
+            </label>
+          </div>
+          <div class="dialog-footer">
+            <button type="button" class="secondary-btn" command="close" commandfor="location-dialog">Cancel</button>
+            <button type="submit" class="primary-btn">Apply Coordinates</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

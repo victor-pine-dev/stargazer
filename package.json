@@ -1,0 +1,27 @@
+{
+  "name": "stargazer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser-based, GPU-accelerated sky observation platform anchored to your live geographic location and time.",
+  "scripts": {
+    "catalog:build": "node scripts/build-catalog.mjs",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "astronomy-engine": "^2.1.19",
+    "invokers-polyfill": "^0.5.2",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/three": "^0.187.0",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.8"
+  }
+}
