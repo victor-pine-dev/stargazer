@@ -37,6 +37,15 @@ import {
   propagateSatelliteState,
 } from '../satellites';
 import { deviceOrientationToSkyLook } from '../../services/gyroService';
+import {
+  computeAircraftLookAngles,
+  computeAircraftSkyArc,
+  extrapolateAircraftGeodetic,
+  generateSimulatedCorridorTraffic,
+  parseOpenSkyResponse,
+  parseReadsbResponse,
+  propagateAircraftState,
+} from '../aircraft';
 
 describe('Astronomical Coordinate & Sidereal Math', () => {
   it('converts RA/Dec to orthonormal J2000 unit vectors', () => {
@@ -713,5 +722,243 @@ describe('Phase 5 Azure Static Web Apps Config, CI/CD & Secret Hygiene', () => {
         /onmicrosoft\.com|AZURE_SUBSCRIPTION_ID=|AZURE_RESOURCE_GROUP=|AZURE_STATIC_WEB_APPS_API_TOKEN=/i,
       );
     }
+  });
+});
+
+describe('Phase 6 Live ADS-B Aircraft Sky Tracker & Dead-Reckoning', () => {
+  const seaLevelNyc = {
+    ...DEFAULT_LOCATION,
+    latitude: 40.7128,
+    longitude: -74.006,
+    elevation: 0,
+  };
+
+  it('parses readsb (adsb.fi / adsb.lol) and OpenSky payloads while filtering grounded craft', () => {
+    const nowMs = Date.UTC(2026, 10, 14, 22, 0, 0);
+
+    const readsbPayload = {
+      aircraft: [
+        {
+          hex: 'abf2ea',
+          flight: 'SWA2083 ',
+          r: 'N8692F',
+          t: 'B738',
+          desc: 'BOEING 737-800',
+          ownOp: 'SOUTHWEST AIRLINES',
+          alt_baro: 26425,
+          alt_geom: 25650,
+          gs: 435.5,
+          track: 232.18,
+          baro_rate: 1536,
+          squawk: '7141',
+          category: 'A3',
+          lat: 40.539185,
+          lon: -75.060181,
+          seen_pos: 1.5,
+        },
+        {
+          hex: 'a94b08',
+          flight: 'GND001',
+          alt_baro: 'ground',
+          lat: 40.6886,
+          lon: -74.1754,
+        },
+      ],
+    };
+
+    const parsedReadsb = parseReadsbResponse(readsbPayload, nowMs);
+    expect(parsedReadsb.length).toBe(1);
+    expect(parsedReadsb[0].callsign).toBe('SWA2083');
+    expect(parsedReadsb[0].typeCode).toBe('B738');
+    expect(parsedReadsb[0].fetchedAtMs).toBe(nowMs - 1500);
+
+    const openSkyPayload = {
+      time: Math.floor(nowMs / 1000),
+      states: [
+        [
+          'ac7cba',
+          'SWA438  ',
+          'United States',
+          Math.floor(nowMs / 1000) - 2,
+          Math.floor(nowMs / 1000),
+          -74.0632,
+          40.5608,
+          10000,
+          false,
+          240,
+          49.5,
+          -5.0,
+          null,
+          10000,
+          '5236',
+          false,
+          0,
+        ],
+        [
+          'a94b09',
+          'TAX100  ',
+          'United States',
+          Math.floor(nowMs / 1000),
+          Math.floor(nowMs / 1000),
+          -74.17,
+          40.68,
+          10,
+          true,
+          5,
+          180,
+          0,
+          null,
+          10,
+          '1200',
+          false,
+          0,
+        ],
+      ],
+    };
+
+    const parsedOpenSky = parseOpenSkyResponse(openSkyPayload, nowMs);
+    expect(parsedOpenSky.length).toBe(1);
+    expect(parsedOpenSky[0].callsign).toBe('SWA438');
+    expect(parsedOpenSky[0].altGeomFt).toBeCloseTo(32808, -1);
+    expect(parsedOpenSky[0].groundSpeedKt).toBeCloseTo(466.5, 0);
+  });
+
+  it('computes accurate topocentric look angles overhead and 40 km North', () => {
+    const overhead = computeAircraftLookAngles(
+      seaLevelNyc.latitude,
+      seaLevelNyc.longitude,
+      35000,
+      seaLevelNyc,
+    );
+    expect(overhead.altDeg).toBeCloseTo(90, 1);
+    expect(overhead.slantRangeKm).toBeCloseTo(10.668, 2);
+    expect(overhead.groundDistanceKm).toBeLessThan(0.05);
+
+    // ~40 km due North along observer meridian (~0.3593 deg latitude)
+    const northLat = seaLevelNyc.latitude + 40 / 111.32;
+    const north = computeAircraftLookAngles(
+      northLat,
+      seaLevelNyc.longitude,
+      35000,
+      seaLevelNyc,
+    );
+    expect(Math.min(north.azDeg, 360 - north.azDeg)).toBeLessThan(0.5);
+    expect(north.altDeg).toBeGreaterThan(13);
+    expect(north.altDeg).toBeLessThan(17);
+    expect(north.groundDistanceKm).toBeCloseTo(40, 0);
+  });
+
+  it('dead-reckons aircraft position with clamping and velocity-aligned nextWorldDir', () => {
+    const nowMs = Date.UTC(2026, 10, 14, 22, 0, 0);
+    const rec = {
+      hex: 'a1b2c3',
+      callsign: 'UAL418',
+      registration: 'N37518',
+      typeCode: 'B738',
+      modelDesc: 'BOEING 737-800',
+      operator: 'UNITED AIRLINES',
+      latDeg: 40.5,
+      lonDeg: -74.0,
+      altBaroFt: 30000,
+      altGeomFt: 30000,
+      groundSpeedKt: 480,
+      trackDeg: 0, // due North
+      verticalRateFpm: 1200,
+      squawk: '1200',
+      category: 'A3',
+      fetchedAtMs: nowMs,
+    };
+
+    const moved30 = extrapolateAircraftGeodetic(rec, 30);
+    expect(moved30.latDeg).toBeGreaterThan(rec.latDeg);
+    expect(moved30.lonDeg).toBeCloseTo(rec.lonDeg, 4);
+    expect(moved30.altitudeFt).toBeCloseTo(30600, 1);
+
+    // Ensure runaway dt > 75s is clamped cleanly
+    const movedClamped = extrapolateAircraftGeodetic(rec, 300);
+    const moved75 = extrapolateAircraftGeodetic(rec, 75);
+    expect(movedClamped.latDeg).toBeCloseTo(moved75.latDeg, 6);
+    expect(movedClamped.altitudeFt).toBeCloseTo(moved75.altitudeFt, 2);
+
+    const state = propagateAircraftState(rec, seaLevelNyc, nowMs + 10_000);
+    expect(state.nextWorldDir).not.toEqual(state.worldDir);
+    const dirDot =
+      state.worldDir[0] * state.nextWorldDir[0] +
+      state.worldDir[1] * state.nextWorldDir[1] +
+      state.worldDir[2] * state.nextWorldDir[2];
+    expect(dirDot).toBeLessThan(0.99999);
+    expect(dirDot).toBeGreaterThan(0.99);
+    expect(state.trailPoints.length).toBe(4);
+
+    const skyArc = computeAircraftSkyArc(rec, seaLevelNyc, nowMs + 10_000);
+    expect(skyArc.length).toBeGreaterThan(20);
+    expect(skyArc[0].timeOffsetSec).toBe(-60);
+    expect(skyArc[skyArc.length - 1].timeOffsetSec).toBe(90);
+  });
+
+  it('generates regional corridor fallback and integrates aircraft with search and telemetry', () => {
+    const nowMs = Date.UTC(2026, 10, 14, 22, 0, 0);
+    const eqToWorld = computeEquatorialToWorldMatrix4(
+      new Date(nowMs),
+      seaLevelNyc.latitude,
+      seaLevelNyc.longitude,
+    );
+    const ephemeris = computeSolarSystemEphemeris(
+      new Date(nowMs),
+      seaLevelNyc.latitude,
+      seaLevelNyc.longitude,
+      seaLevelNyc.elevation,
+    );
+
+    const simRecords = generateSimulatedCorridorTraffic(seaLevelNyc, nowMs);
+    expect(simRecords.length).toBeGreaterThanOrEqual(8);
+
+    const acStates = simRecords.map((r) => propagateAircraftState(r, seaLevelNyc, nowMs, eqToWorld));
+    const above = acStates.filter((a) => a.isAboveHorizon);
+    expect(above.length).toBeGreaterThan(0);
+
+    const dummyCatalog = {
+      stars: {
+        count: 0,
+        positionsJ2000: new Float32Array(0),
+        starMeta: new Float32Array(0),
+        raDec: new Float32Array(0),
+      },
+      constellations: [],
+      starNames: new Map<number, NamedStarEntry>(),
+      namedStarList: [],
+      dsos: [],
+    };
+
+    const hits = searchCelestialCatalog(
+      'UAL418',
+      'aircraft',
+      dummyCatalog,
+      ephemeris,
+      eqToWorld,
+      10,
+      [],
+      acStates,
+    );
+    expect(hits.length).toBe(1);
+    expect(hits[0].kind).toBe('aircraft');
+    expect(hits[0].name).toContain('UAL418');
+
+    const telemetry = computeObjectTelemetry(
+      hits[0].ref,
+      dummyCatalog,
+      ephemeris,
+      eqToWorld,
+      new Date(nowMs),
+      seaLevelNyc,
+      [],
+      [],
+      acStates,
+    );
+    expect(telemetry).not.toBeNull();
+    expect(telemetry?.kind).toBe('aircraft');
+    expect(telemetry?.vmagFormatted).toContain('FL');
+    expect(telemetry?.distanceLabel).toContain('km slant');
+    expect(telemetry?.rts.transit).toContain('HDG');
   });
 });

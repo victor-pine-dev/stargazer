@@ -32,9 +32,15 @@ import {
   type SatelliteSystemSnapshot,
   type TleSourceKind,
 } from '../astro/satellites';
+import {
+  AircraftTrackerController,
+  type AdsbSourceKind,
+  type AircraftSystemSnapshot,
+} from '../astro/aircraft';
 import type { LoadedCelestialData } from '../data/catalogLoader';
 import { GyroSensorController, type GyroControllerState } from '../services/gyroService';
 import type { ObserverLocation } from '../services/locationService';
+import { AC_SPHERE_RADIUS, createAircraftLayer } from './aircraftLayer';
 import { createAtmosphereDome } from './atmosphereDome';
 import { createCompassHorizon } from './compassHorizon';
 import { createConstellationLayer, type ScreenLabelItem } from './constellationLayer';
@@ -52,6 +58,7 @@ export interface LayerVisibilityState {
   planets: boolean;
   dso: boolean;
   satellites: boolean;
+  aircraft: boolean;
 }
 
 export type TimeMode = 'live' | 'tonight' | 'sunset' | 'custom';
@@ -83,6 +90,7 @@ export interface TelemetrySnapshot {
   selectedReticle: ReticleScreenPosition | null;
   isTrackingObject: boolean;
   satellites: SatelliteSystemSnapshot;
+  aircraft: AircraftSystemSnapshot;
   arGyro: GyroControllerState;
 }
 
@@ -135,9 +143,11 @@ export class SkyEngine {
   private readonly dso: ReturnType<typeof createDsoLayer>;
   private readonly solarSystem: ReturnType<typeof createSolarSystemLayer>;
   private readonly satellitesLayer: ReturnType<typeof createSatelliteLayer>;
+  private readonly aircraftLayer: ReturnType<typeof createAircraftLayer>;
   private readonly constellations: ReturnType<typeof createConstellationLayer>;
   private readonly horizon: ReturnType<typeof createCompassHorizon>;
   private readonly satTracker: SatelliteTrackerController;
+  private readonly aircraftTracker: AircraftTrackerController;
   private readonly gyro: GyroSensorController;
 
   private readonly dsoPickAnchors: Array<{ id: string; mag: number; j2000Vec: THREE.Vector3 }>;
@@ -158,6 +168,7 @@ export class SkyEngine {
     planets: true,
     dso: true,
     satellites: true,
+    aircraft: true,
   };
 
   private backendLabel: TelemetrySnapshot['backendLabel'] = 'WebGPU · WGSL';
@@ -242,6 +253,7 @@ export class SkyEngine {
     this.dso = createDsoLayer(options.catalog.dsos);
     this.solarSystem = createSolarSystemLayer();
     this.satellitesLayer = createSatelliteLayer();
+    this.aircraftLayer = createAircraftLayer();
     this.constellations = createConstellationLayer(
       options.catalog.constellations,
       options.catalog.namedStarList,
@@ -253,6 +265,7 @@ export class SkyEngine {
     this.scene.add(this.dso.mesh);
     this.scene.add(this.solarSystem.group);
     this.scene.add(this.satellitesLayer.group);
+    this.scene.add(this.aircraftLayer.group);
     this.scene.add(this.constellations.group);
     this.scene.add(this.horizon.group);
 
@@ -264,6 +277,15 @@ export class SkyEngine {
       },
     );
     void this.satTracker.refreshTles(this.location, this.simTimestampMs, null, false);
+
+    this.aircraftTracker = new AircraftTrackerController(
+      this.location,
+      this.simTimestampMs,
+      () => {
+        this.lastHudPushMs = 0;
+      },
+    );
+    void this.aircraftTracker.refreshLiveTraffic(this.location, this.simTimestampMs, null, true);
 
     this.gyro = new GyroSensorController(() => {
       this.lastHudPushMs = 0;
@@ -323,10 +345,22 @@ export class SkyEngine {
       : null;
   }
 
+  private getSelectedAircraftHex(): string | null {
+    return this.selectedRef?.kind === 'aircraft' && this.selectedRef.aircraftHex
+      ? this.selectedRef.aircraftHex
+      : null;
+  }
+
   setLocation(loc: ObserverLocation): void {
     this.location = loc;
     this.refreshAstroState();
     this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
+    void this.aircraftTracker.refreshLiveTraffic(
+      this.location,
+      this.simTimestampMs,
+      this.getSelectedAircraftHex(),
+      true,
+    );
     this.lastHudPushMs = 0;
   }
 
@@ -400,6 +434,14 @@ export class SkyEngine {
     this.simTimestampMs = Date.now();
     this.refreshAstroState();
     this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
+    this.aircraftTracker.requestUpdate(
+      this.simTimestampMs,
+      this.location,
+      this.getSelectedAircraftHex(),
+      true,
+      this.eqToWorld,
+      this.layers.aircraft,
+    );
     this.lastHudPushMs = 0;
   }
 
@@ -452,6 +494,7 @@ export class SkyEngine {
     this.isTrackingObject = Boolean(options?.track && ref);
 
     const satSnap = this.satTracker.getSnapshot();
+    const acSnap = this.aircraftTracker.getSnapshot();
     const observedDate = new Date(this.simTimestampMs);
     const telemetry = ref
       ? computeObjectTelemetry(
@@ -463,6 +506,7 @@ export class SkyEngine {
           this.location,
           satSnap.satellites,
           satSnap.issPasses,
+          acSnap.aircraft,
         )
       : null;
 
@@ -476,6 +520,15 @@ export class SkyEngine {
 
     if (ref?.kind === 'satellite') {
       this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
+    } else if (ref?.kind === 'aircraft') {
+      this.aircraftTracker.requestUpdate(
+        this.simTimestampMs,
+        this.location,
+        this.getSelectedAircraftHex(),
+        true,
+        this.eqToWorld,
+        this.layers.aircraft,
+      );
     }
 
     if (options?.flyTo) {
@@ -495,6 +548,7 @@ export class SkyEngine {
   centerSelectedObject(targetFovDeg?: number): void {
     if (!this.selectedRef) return;
     const satSnap = this.satTracker.getSnapshot();
+    const acSnap = this.aircraftTracker.getSnapshot();
     const telemetry = computeObjectTelemetry(
       this.selectedRef,
       this.catalog,
@@ -504,6 +558,7 @@ export class SkyEngine {
       this.location,
       satSnap.satellites,
       satSnap.issPasses,
+      acSnap.aircraft,
     );
     if (!telemetry) return;
     this.isTrackingObject = true;
@@ -520,11 +575,44 @@ export class SkyEngine {
       this.eqToWorld,
       32,
       this.satTracker.getSnapshot().satellites,
+      this.aircraftTracker.getSnapshot().aircraft,
     );
   }
 
   getSatelliteSnapshot(): SatelliteSystemSnapshot {
     return this.satTracker.getSnapshot();
+  }
+
+  getAircraftSnapshot(): AircraftSystemSnapshot {
+    return this.aircraftTracker.getSnapshot();
+  }
+
+  refreshAircraftRadar(): Promise<{ source: AdsbSourceKind; count: number }> {
+    return this.aircraftTracker.refreshLiveTraffic(
+      this.location,
+      this.simTimestampMs,
+      this.getSelectedAircraftHex(),
+      true,
+    );
+  }
+
+  trackClosestAircraft(): void {
+    this.setLayers({ aircraft: true });
+    this.aircraftTracker.requestUpdate(
+      this.simTimestampMs,
+      this.location,
+      this.getSelectedAircraftHex(),
+      true,
+      this.eqToWorld,
+      true,
+    );
+    const acList = this.aircraftTracker.getSnapshot().aircraft;
+    const target = acList.find((a) => a.isAboveHorizon) ?? acList[0];
+    if (!target) return;
+    this.selectObject(
+      { id: target.id, kind: 'aircraft', aircraftHex: target.hex },
+      { flyTo: true, track: true, fovDeg: 40 },
+    );
   }
 
   refreshSatelliteTles(): Promise<{ source: TleSourceKind; updatedCount: number }> {
@@ -633,6 +721,33 @@ export class SkyEngine {
           if (score < bestRankScore) {
             bestRankScore = score;
             bestRef = { id: sat.id, kind: 'satellite', satNoradId: sat.noradId };
+          }
+        }
+      }
+    }
+
+    // 0b. Check visible ADS-B Aircraft
+    if (this.layers.aircraft) {
+      const aircraft = this.aircraftTracker.getSnapshot().aircraft;
+      for (const ac of aircraft) {
+        if (ac.altDeg < -0.5) continue;
+        this.tempPickProj
+          .set(
+            ac.worldDir[0] * AC_SPHERE_RADIUS,
+            ac.worldDir[1] * AC_SPHERE_RADIUS,
+            ac.worldDir[2] * AC_SPHERE_RADIUS,
+          )
+          .project(this.camera);
+        if (this.tempPickProj.z < -1 || this.tempPickProj.z > 1) continue;
+
+        const sx = (this.tempPickProj.x * 0.5 + 0.5) * this.viewportWidth;
+        const sy = (-this.tempPickProj.y * 0.5 + 0.5) * this.viewportHeight;
+        const distPx = Math.hypot(sx - screenX, sy - screenY);
+        if (distPx <= 28) {
+          const score = distPx - 10;
+          if (score < bestRankScore) {
+            bestRankScore = score;
+            bestRef = { id: ac.id, kind: 'aircraft', aircraftHex: ac.hex };
           }
         }
       }
@@ -932,6 +1047,10 @@ export class SkyEngine {
       const sat = this.satTracker.getSnapshot().satellites.find((s) => s.noradId === ref.satNoradId);
       return sat ? { azDeg: sat.azDeg, altDeg: sat.altDeg } : null;
     }
+    if (ref.kind === 'aircraft' && ref.aircraftHex) {
+      const ac = this.aircraftTracker.getSnapshot().aircraft.find((a) => a.hex === ref.aircraftHex);
+      return ac ? { azDeg: ac.azDeg, altDeg: ac.altDeg } : null;
+    }
     return null;
   }
 
@@ -959,8 +1078,18 @@ export class SkyEngine {
 
       const observedDate = this.refreshAstroState();
       const selectedSatId = this.getSelectedSatNoradId();
+      const selectedAircraftHex = this.getSelectedAircraftHex();
       this.satTracker.requestUpdate(this.simTimestampMs, this.location, selectedSatId);
+      this.aircraftTracker.requestUpdate(
+        this.simTimestampMs,
+        this.location,
+        selectedAircraftHex,
+        false,
+        this.eqToWorld,
+        this.layers.aircraft,
+      );
       const satSnap = this.satTracker.getSnapshot();
+      const acSnap = this.aircraftTracker.getSnapshot();
 
       const lastRad = computeLocalApparentSiderealTimeRad(observedDate, this.location.longitude);
       const ephemeris = this.lastEphemeris;
@@ -1074,6 +1203,17 @@ export class SkyEngine {
         pixelRatio: dpr,
         visible: this.layers.satellites,
       });
+      this.aircraftLayer.update({
+        aircraft: acSnap.aircraft,
+        selectedArc: acSnap.selectedArc,
+        selectedHex: selectedAircraftHex,
+        elapsedSec,
+        fovDeg: this.fovDeg,
+        viewportWidth: this.viewportWidth,
+        viewportHeight: this.viewportHeight,
+        pixelRatio: dpr,
+        visible: this.layers.aircraft,
+      });
       this.constellations.setEqToWorldMatrix(this.eqToWorld);
       this.constellations.setVisibility({
         showLines: this.layers.constellations,
@@ -1131,8 +1271,18 @@ export class SkyEngine {
                 this.fovDeg,
               )
             : [];
+          const acLabels = this.layers.aircraft
+            ? this.aircraftLayer.collectVisibleLabels(
+                this.camera,
+                acSnap.aircraft,
+                selectedAircraftHex,
+                this.viewportWidth,
+                this.viewportHeight,
+                this.fovDeg,
+              )
+            : [];
 
-          const allSkyCandidates = [...satLabels, ...planetLabels, ...constStarLabels, ...dsoLabels];
+          const allSkyCandidates = [...satLabels, ...acLabels, ...planetLabels, ...constStarLabels, ...dsoLabels];
           allSkyCandidates.sort((a, b) => b.priority - a.priority);
           for (const item of allSkyCandidates) {
             const tooClose = mergedSkyLabels.some(
@@ -1155,6 +1305,7 @@ export class SkyEngine {
               this.location,
               satSnap.satellites,
               satSnap.issPasses,
+              acSnap.aircraft,
             )
           : null;
         const selectedReticle = selectedObject
@@ -1182,6 +1333,7 @@ export class SkyEngine {
           selectedReticle,
           isTrackingObject: this.isTrackingObject,
           satellites: satSnap,
+          aircraft: acSnap,
           arGyro: this.gyro.getState(),
         });
       }
@@ -1204,11 +1356,13 @@ export class SkyEngine {
 
     this.gyro.stop();
     this.satTracker.dispose();
+    this.aircraftTracker.dispose();
     this.atmosphere.dispose();
     this.starfield.dispose();
     this.dso.dispose();
     this.solarSystem.dispose();
     this.satellitesLayer.dispose();
+    this.aircraftLayer.dispose();
     this.constellations.dispose();
     this.horizon.dispose();
     this.renderer.dispose();

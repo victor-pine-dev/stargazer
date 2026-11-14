@@ -28,3 +28,8 @@ Phased delivery plan for building, verifying, and deploying the Stargazer browse
 ## Phase 5: Azure Cloud Provisioning & Automated CI/CD
 - **Azure Infrastructure**: Provision an isolated Azure resource group and Azure Static Web App (`Free` SKU) using local CLI/environment configuration without committing subscription IDs, resource group names, or account identifiers to the public repository.
 - **CI/CD & Production Release**: Configure GitHub Actions deployment workflow (referencing GitHub repository secrets only) with immutable cache headers for binary catalog assets, and verify live HTTPS geolocation & WebGPU/WebGL2 rendering on the deployed endpoint.
+
+## Phase 6: Live ADS-B Aircraft Sky Tracker & Flight Radar
+- **Open ADS-B Proxy (`/api/aircraft`)**: Zero-dependency managed API function (`api/aircraft`) and Vite dev/preview middleware normalizing live local traffic across `opendata.adsb.fi`, `api.adsb.lol`, and `opensky-network.org` with regional corridor fallback.
+- **Topocentric Look Angles & 60 FPS Dead-Reckoning**: WGS-84 geodetic-to-horizon look-angle solver (`geodeticToEcf` + `ecfToLookAngles`), smooth dead-reckoned interpolation between polls, contrails, and `-60s` to `+90s` sky trajectory arcs.
+- **WebGPU/WebGL2 Swept-Wing Aircraft Shader & Radar HUD**: Velocity-oriented instanced aircraft glyphs with navigation/anti-collision strobes, `✈ Flights` drawer, `Cmd/Ctrl+K` aircraft search, and aviation telemetry inspection.

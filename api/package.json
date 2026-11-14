@@ -1,0 +1,6 @@
+{
+  "name": "stargazer-api",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Zero-dependency Azure Static Web Apps managed API relay for open ADS-B sky traffic."
+}

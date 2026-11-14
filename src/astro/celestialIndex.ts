@@ -32,9 +32,16 @@ import type {
   SatellitePassPrediction,
   SatelliteTelemetryState,
 } from './satellites';
+import type { AircraftTelemetryState } from './aircraft';
 import { bvToKelvin, bvToRGB, computeAirmass } from './spectral';
 
-export type CelestialObjectKind = 'planet' | 'star' | 'dso' | 'constellation' | 'satellite';
+export type CelestialObjectKind =
+  | 'planet'
+  | 'star'
+  | 'dso'
+  | 'constellation'
+  | 'satellite'
+  | 'aircraft';
 
 export interface CelestialObjectRef {
   id: string;
@@ -45,6 +52,7 @@ export interface CelestialObjectRef {
   dsoId?: string;
   constellationId?: string;
   satNoradId?: number;
+  aircraftHex?: string;
 }
 
 export interface RiseTransitSetTimes {
@@ -617,6 +625,7 @@ export function computeObjectTelemetry(
   location: ObserverLocation,
   satellites: SatelliteTelemetryState[] = [],
   issPasses: SatellitePassPrediction[] = [],
+  aircraft: AircraftTelemetryState[] = [],
 ): InspectedObjectTelemetry | null {
   if (ref.kind === 'planet' && ref.bodyId) {
     const body = getSolarSystemBody(ref.bodyId, ephemeris);
@@ -885,6 +894,49 @@ export function computeObjectTelemetry(
     };
   }
 
+  if (ref.kind === 'aircraft' && ref.aircraftHex) {
+    const ac = aircraft.find((a) => a.hex === ref.aircraftHex);
+    if (!ac) return null;
+
+    const modelTitle = ac.modelDesc || ac.typeCode;
+    const name = modelTitle ? `${ac.callsign} (${modelTitle})` : ac.callsign;
+    const subtitle = `${ac.operator || 'ADS-B Transponder'} · Reg ${ac.registration || '—'} · ICAO ${ac.hex.toUpperCase()}`;
+    const vRateFormatted = `${ac.verticalRateFpm >= 0 ? '+' : ''}${Math.round(ac.verticalRateFpm)} fpm`;
+
+    return {
+      ref,
+      id: ac.id,
+      kind: 'aircraft',
+      name,
+      subtitle,
+      categoryLabel: `Aircraft · ${ac.typeCode || 'ADS-B'}`,
+      altDeg: ac.altDeg,
+      azDeg: ac.azDeg,
+      azCardinal: ac.azCardinal,
+      raRad: ac.raRad,
+      decRad: ac.decRad,
+      raFormatted: formatHMS(ac.raRad, true),
+      decFormatted: formatDMS(ac.decRad * RAD_TO_DEG),
+      vmag: ac.vmag,
+      vmagFormatted: `${ac.flightLevel} (${Math.round(ac.altitudeFt).toLocaleString('en-US')} ft)`,
+      distanceLabel: `${ac.slantRangeKm.toFixed(1)} km slant (${ac.groundDistanceKm.toFixed(1)} km ground)`,
+      spectralOrMorphology: `${modelTitle || 'Airborne Craft'} · ${Math.round(ac.groundSpeedKt)} kt (${Math.round(ac.speedKmh)} km/h)`,
+      spectralColorHex: ac.colorHex,
+      airmass: ac.altDeg > 0 ? computeAirmass(ac.altDeg) : null,
+      rts: {
+        rise: ac.flightLevel,
+        transit: `HDG ${Math.round(ac.trackDeg)}° ${ac.trackCardinal}`,
+        transitAltDeg: Math.max(0, ac.altDeg),
+        set: vRateFormatted,
+        state: 'normal',
+      },
+      isAboveHorizon: ac.isAboveHorizon,
+      description: ac.description,
+      recommendedFovDeg: 32,
+      worldDir: ac.worldDir,
+    };
+  }
+
   return null;
 }
 
@@ -918,10 +970,47 @@ export function searchCelestialCatalog(
   eqToWorld: THREE.Matrix4,
   maxResults = 32,
   satellites: SatelliteTelemetryState[] = [],
+  aircraft: AircraftTelemetryState[] = [],
 ): SearchResultItem[] {
   const q = query.trim().toLowerCase();
   const results: SearchResultItem[] = [];
   const constMap = getConstellationMap(catalog);
+
+  // -1. Live Airborne Aircraft (ADS-B)
+  if (filterKind === 'all' || filterKind === 'aircraft') {
+    for (const ac of aircraft) {
+      const proximityBonus = Math.max(0, 10 - ac.slantRangeKm * 0.2);
+      const emptyFilterOffset = !q && filterKind === 'all' ? -10 : 0;
+      const match = matchQueryScore(
+        q,
+        [
+          ac.callsign,
+          ac.registration,
+          ac.typeCode,
+          ac.modelDesc,
+          ac.operator,
+          ac.hex,
+          ac.flightLevel,
+        ],
+        (ac.isAboveHorizon ? 14 : -15) + proximityBonus + emptyFilterOffset,
+      );
+      if (match > 0) {
+        results.push({
+          ref: { id: ac.id, kind: 'aircraft', aircraftHex: ac.hex },
+          id: ac.id,
+          kind: 'aircraft',
+          name: ac.displayName,
+          subtitle: `${ac.flightLevel} · ${Math.round(ac.groundSpeedKt)} kt · ${ac.slantRangeKm.toFixed(1)} km${ac.operator ? ` · ${ac.operator}` : ''}`,
+          categoryBadge: ac.typeCode ? `Aircraft · ${ac.typeCode}` : 'Aircraft',
+          vmag: ac.vmag,
+          altDeg: ac.altDeg,
+          azCardinal: ac.azCardinal,
+          isAboveHorizon: ac.isAboveHorizon,
+          score: match,
+        });
+      }
+    }
+  }
 
   // 0. Live Satellites & Space Stations
   if (filterKind === 'all' || filterKind === 'satellite') {

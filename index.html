@@ -58,14 +58,14 @@
           <span class="location-caret" aria-hidden="true">▾</span>
         </button>
 
-        <div class="hud-actions-group" role="group" aria-label="Catalog search, sky tour, satellites, and AR mode">
+        <div class="hud-actions-group" role="group" aria-label="Catalog search, sky tour, satellites, flights, and AR mode">
           <button
             id="search-trigger-btn"
             type="button"
             class="hud-panel action-pill"
             command="show-modal"
             commandfor="search-dialog"
-            aria-label="Search celestial objects (Command or Control K)"
+            aria-label="Search celestial objects and live aircraft (Command or Control K)"
           >
             <span class="action-pill-icon" aria-hidden="true">⌕</span>
             <span>Search</span>
@@ -90,6 +90,16 @@
           >
             <span class="action-pill-icon" aria-hidden="true">🛰</span>
             <span>ISS &amp; Passes</span>
+          </button>
+          <button
+            id="flights-toggle-btn"
+            type="button"
+            class="hud-panel action-pill"
+            aria-expanded="false"
+            aria-controls="flights-panel"
+          >
+            <span class="action-pill-icon" aria-hidden="true">✈</span>
+            <span>Flights</span>
           </button>
           <button
             id="ar-gyro-btn"
@@ -217,6 +227,47 @@
         </div>
       </aside>
 
+      <!-- Live ADS-B Aircraft Sky Radar Drawer -->
+      <aside id="flights-panel" class="hud-panel flights-panel" aria-labelledby="flights-panel-title" hidden>
+        <header class="side-panel-header">
+          <div>
+            <h2 id="flights-panel-title" class="side-panel-title">Live Sky Flights (ADS-B)</h2>
+            <p id="flights-source-label" class="side-panel-subtitle">ADS-B Radar · Loading live air traffic…</p>
+          </div>
+          <button
+            id="flights-close-btn"
+            type="button"
+            class="dialog-close"
+            aria-label="Close live flights drawer"
+          >
+            ✕
+          </button>
+        </header>
+
+        <section class="iss-live-card" aria-label="Highest Overhead Aircraft Telemetry">
+          <div class="iss-live-header">
+            <div>
+              <span id="flights-closest-badge" class="badge badge-gpu">ADS-B</span>
+              <strong id="flights-closest-name" class="iss-live-name">Scanning Airspace…</strong>
+            </div>
+            <span id="flights-closest-phase" class="badge badge-subtle">LIVE</span>
+          </div>
+          <div class="iss-live-metrics mono">
+            <span id="flights-closest-altaz">ALT — · AZ —</span>
+            <span id="flights-closest-metrics">Slant — km · — kt · HDG —</span>
+          </div>
+          <div class="iss-live-actions">
+            <button id="flights-track-btn" type="button" class="primary-btn">Track Overhead</button>
+            <button id="flights-refresh-btn" type="button" class="secondary-btn">Refresh Radar</button>
+          </div>
+        </section>
+
+        <div class="iss-section-block">
+          <h3 id="flights-list-heading" class="field-label">Live Airborne Traffic</h3>
+          <ul id="flights-catalog-list" class="tour-stop-list" role="list"></ul>
+        </div>
+      </aside>
+
       <!-- Click-to-Inspect Live Telemetry Card -->
       <aside id="inspect-card" class="hud-panel inspect-card" aria-labelledby="inspect-title" hidden>
         <header class="side-panel-header">
@@ -260,7 +311,7 @@
             <dd id="inspect-radec" class="mono">—</dd>
           </div>
           <div class="inspect-cell">
-            <dt>VISUAL MAG</dt>
+            <dt id="inspect-mag-label">VISUAL MAG</dt>
             <dd id="inspect-mag" class="mono">—</dd>
           </div>
           <div class="inspect-cell">
@@ -272,15 +323,15 @@
             <dd id="inspect-spectral">—</dd>
           </div>
           <div class="inspect-cell">
-            <dt>RISE</dt>
+            <dt id="inspect-rise-label">RISE</dt>
             <dd id="inspect-rise" class="mono">—</dd>
           </div>
           <div class="inspect-cell">
-            <dt>TRANSIT</dt>
+            <dt id="inspect-transit-label">TRANSIT</dt>
             <dd id="inspect-transit" class="mono">—</dd>
           </div>
           <div class="inspect-cell">
-            <dt>SET</dt>
+            <dt id="inspect-set-label">SET</dt>
             <dd id="inspect-set" class="mono">—</dd>
           </div>
           <div class="inspect-cell">
@@ -364,6 +415,7 @@
           <div class="hud-panel layers-panel" role="group" aria-label="Celestial display layers">
             <button type="button" class="chip-btn is-active" data-layer="planets" aria-pressed="true">Planets</button>
             <button type="button" class="chip-btn is-active" data-layer="satellites" aria-pressed="true">Satellites</button>
+            <button type="button" class="chip-btn is-active" data-layer="aircraft" aria-pressed="true">Aircraft</button>
             <button type="button" class="chip-btn is-active" data-layer="dso" aria-pressed="true">Deep Sky</button>
             <button type="button" class="chip-btn is-active" data-layer="constellations" aria-pressed="true">Constellations</button>
             <button type="button" class="chip-btn" data-layer="boundaries" aria-pressed="false">Boundaries</button>
@@ -467,7 +519,7 @@
             id="celestial-search-input"
             type="search"
             class="text-input"
-            placeholder="Search Sirius, ISS, Saturn, M31, Orion, Hubble, HIP 32349…"
+            placeholder="Search Sirius, ISS, UAL418, Saturn, M31, Orion, Hubble…"
             autocomplete="off"
             autofocus
           />
@@ -475,6 +527,7 @@
             <button type="button" class="chip-btn is-active" data-search-filter="all" aria-pressed="true">All</button>
             <button type="button" class="chip-btn" data-search-filter="planet" aria-pressed="false">Planets</button>
             <button type="button" class="chip-btn" data-search-filter="satellite" aria-pressed="false">Satellites</button>
+            <button type="button" class="chip-btn" data-search-filter="aircraft" aria-pressed="false">Aircraft</button>
             <button type="button" class="chip-btn" data-search-filter="star" aria-pressed="false">Stars</button>
             <button type="button" class="chip-btn" data-search-filter="dso" aria-pressed="false">Deep Sky</button>
             <button type="button" class="chip-btn" data-search-filter="constellation" aria-pressed="false">Constellations</button>

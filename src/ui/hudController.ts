@@ -11,6 +11,10 @@ import {
   type SatelliteSystemSnapshot,
   type SatelliteTelemetryState,
 } from '../astro/satellites';
+import type {
+  AircraftSystemSnapshot,
+  AircraftTelemetryState,
+} from '../astro/aircraft';
 import type { GyroControllerState } from '../services/gyroService';
 import type { ScreenLabelItem } from '../render/constellationLayer';
 import type {
@@ -152,11 +156,15 @@ export class HudController {
   private readonly inspectTourNextBtn: HTMLButtonElement;
   private readonly inspectAltAz: HTMLElement;
   private readonly inspectRaDec: HTMLElement;
+  private readonly inspectMagLabel: HTMLElement;
   private readonly inspectMag: HTMLElement;
   private readonly inspectDist: HTMLElement;
   private readonly inspectSpectral: HTMLElement;
+  private readonly inspectRiseLabel: HTMLElement;
   private readonly inspectRise: HTMLElement;
+  private readonly inspectTransitLabel: HTMLElement;
   private readonly inspectTransit: HTMLElement;
+  private readonly inspectSetLabel: HTMLElement;
   private readonly inspectSet: HTMLElement;
   private readonly inspectAirmass: HTMLElement;
   private readonly inspectDescription: HTMLElement;
@@ -193,6 +201,26 @@ export class HudController {
   private readonly satRowPool = new Map<
     number,
     { btn: HTMLButtonElement; titleEl: HTMLElement; subEl: HTMLElement; posEl: HTMLElement; magEl: HTMLElement }
+  >();
+
+  // Phase 6: Live ADS-B Aircraft Flights Drawer
+  private readonly flightsToggleBtn: HTMLButtonElement;
+  private readonly flightsPanel: HTMLElement;
+  private readonly flightsCloseBtn: HTMLButtonElement;
+  private readonly flightsSourceLabel: HTMLElement;
+  private readonly flightsClosestBadge: HTMLElement;
+  private readonly flightsClosestName: HTMLElement;
+  private readonly flightsClosestPhase: HTMLElement;
+  private readonly flightsClosestAltAz: HTMLElement;
+  private readonly flightsClosestMetrics: HTMLElement;
+  private readonly flightsTrackBtn: HTMLButtonElement;
+  private readonly flightsRefreshBtn: HTMLButtonElement;
+  private readonly flightsListHeading: HTMLElement;
+  private readonly flightsCatalogListEl: HTMLUListElement;
+  private lastFlightsListRenderMs = 0;
+  private readonly flightsRowPool = new Map<
+    string,
+    { li: HTMLLIElement; btn: HTMLButtonElement; titleEl: HTMLElement; subEl: HTMLElement; posEl: HTMLElement; altEl: HTMLElement }
   >();
 
   private readonly arGyroBtn: HTMLButtonElement;
@@ -266,11 +294,15 @@ export class HudController {
     this.inspectTourNextBtn = document.getElementById('inspect-tour-next') as HTMLButtonElement;
     this.inspectAltAz = document.getElementById('inspect-altaz')!;
     this.inspectRaDec = document.getElementById('inspect-radec')!;
+    this.inspectMagLabel = document.getElementById('inspect-mag-label')!;
     this.inspectMag = document.getElementById('inspect-mag')!;
     this.inspectDist = document.getElementById('inspect-dist')!;
     this.inspectSpectral = document.getElementById('inspect-spectral')!;
+    this.inspectRiseLabel = document.getElementById('inspect-rise-label')!;
     this.inspectRise = document.getElementById('inspect-rise')!;
+    this.inspectTransitLabel = document.getElementById('inspect-transit-label')!;
     this.inspectTransit = document.getElementById('inspect-transit')!;
+    this.inspectSetLabel = document.getElementById('inspect-set-label')!;
     this.inspectSet = document.getElementById('inspect-set')!;
     this.inspectAirmass = document.getElementById('inspect-airmass')!;
     this.inspectDescription = document.getElementById('inspect-description')!;
@@ -297,6 +329,20 @@ export class HudController {
     this.issRefreshBtn = document.getElementById('iss-refresh-btn') as HTMLButtonElement;
     this.issPassListEl = document.getElementById('iss-pass-list') as HTMLOListElement;
     this.satCatalogListEl = document.getElementById('sat-catalog-list') as HTMLUListElement;
+
+    this.flightsToggleBtn = document.getElementById('flights-toggle-btn') as HTMLButtonElement;
+    this.flightsPanel = document.getElementById('flights-panel')!;
+    this.flightsCloseBtn = document.getElementById('flights-close-btn') as HTMLButtonElement;
+    this.flightsSourceLabel = document.getElementById('flights-source-label')!;
+    this.flightsClosestBadge = document.getElementById('flights-closest-badge')!;
+    this.flightsClosestName = document.getElementById('flights-closest-name')!;
+    this.flightsClosestPhase = document.getElementById('flights-closest-phase')!;
+    this.flightsClosestAltAz = document.getElementById('flights-closest-altaz')!;
+    this.flightsClosestMetrics = document.getElementById('flights-closest-metrics')!;
+    this.flightsTrackBtn = document.getElementById('flights-track-btn') as HTMLButtonElement;
+    this.flightsRefreshBtn = document.getElementById('flights-refresh-btn') as HTMLButtonElement;
+    this.flightsListHeading = document.getElementById('flights-list-heading')!;
+    this.flightsCatalogListEl = document.getElementById('flights-catalog-list') as HTMLUListElement;
 
     this.arGyroBtn = document.getElementById('ar-gyro-btn') as HTMLButtonElement;
     this.arHudBanner = document.getElementById('ar-hud-banner')!;
@@ -659,6 +705,31 @@ export class HudController {
       }
     });
 
+    // Live ADS-B Flights drawer
+    this.flightsToggleBtn.addEventListener('click', () => {
+      const opening = this.flightsPanel.hidden;
+      this.setFlightsPanelOpen(opening);
+    });
+    this.flightsCloseBtn.addEventListener('click', () => {
+      this.setFlightsPanelOpen(false);
+    });
+    this.flightsTrackBtn.addEventListener('click', () => {
+      this.engine.trackClosestAircraft();
+      this.syncLayerToggleButtons();
+    });
+    this.flightsRefreshBtn.addEventListener('click', async () => {
+      this.flightsRefreshBtn.disabled = true;
+      this.flightsRefreshBtn.textContent = 'Scanning…';
+      try {
+        await this.engine.refreshAircraftRadar();
+        this.lastFlightsListRenderMs = 0;
+        this.updateFlightsDrawer(this.engine.getAircraftSnapshot(), null, true);
+      } finally {
+        this.flightsRefreshBtn.disabled = false;
+        this.flightsRefreshBtn.textContent = 'Refresh Radar';
+      }
+    });
+
     // Mobile AR Gyroscope mode
     this.arGyroBtn.addEventListener('click', async () => {
       const state = await this.engine.toggleArGyro();
@@ -683,7 +754,7 @@ export class HudController {
     if (this.currentSearchResults.length === 0) {
       const empty = document.createElement('li');
       empty.className = 'preset-item-btn';
-      empty.textContent = 'No matching stars, planets, satellites, DSOs, or constellations.';
+      empty.textContent = 'No matching stars, planets, satellites, aircraft, DSOs, or constellations.';
       this.searchResultsEl.appendChild(empty);
       return;
     }
@@ -719,7 +790,12 @@ export class HudController {
         : `Below (${item.altDeg.toFixed(0)}°)`;
       const magSpan = document.createElement('span');
       magSpan.className = 'preset-item-region';
-      magSpan.textContent = item.vmag !== null ? `mag ${item.vmag.toFixed(1)}` : 'Region';
+      magSpan.textContent =
+        item.kind === 'aircraft'
+          ? item.categoryBadge
+          : item.vmag !== null
+            ? `mag ${item.vmag.toFixed(1)}`
+            : 'Region';
       right.append(altBadge, magSpan);
 
       btn.append(left, right);
@@ -748,6 +824,9 @@ export class HudController {
     if (item.kind === 'satellite') {
       this.engine.setLayers({ satellites: true });
       this.syncLayerToggleButtons();
+    } else if (item.kind === 'aircraft') {
+      this.engine.setLayers({ aircraft: true });
+      this.syncLayerToggleButtons();
     }
     this.engine.selectObject(item.ref, { flyTo: true, track: true });
   }
@@ -755,6 +834,9 @@ export class HudController {
   private setTourPanelOpen(open: boolean): void {
     if (open && !this.issPanel.hidden) {
       this.setIssPanelOpen(false);
+    }
+    if (open && !this.flightsPanel.hidden) {
+      this.setFlightsPanelOpen(false);
     }
     this.tourPanel.hidden = !open;
     this.tourToggleBtn.classList.toggle('is-active', open);
@@ -768,6 +850,9 @@ export class HudController {
     if (open && !this.tourPanel.hidden) {
       this.setTourPanelOpen(false);
     }
+    if (open && !this.flightsPanel.hidden) {
+      this.setFlightsPanelOpen(false);
+    }
     this.issPanel.hidden = !open;
     this.issToggleBtn.classList.toggle('is-active', open);
     this.issToggleBtn.setAttribute('aria-expanded', String(open));
@@ -775,6 +860,22 @@ export class HudController {
       this.lastPassesRenderKey = '';
       this.lastSatListRenderMs = 0;
       this.updateSatelliteDrawer(this.engine.getSatelliteSnapshot(), null);
+    }
+  }
+
+  private setFlightsPanelOpen(open: boolean): void {
+    if (open && !this.tourPanel.hidden) {
+      this.setTourPanelOpen(false);
+    }
+    if (open && !this.issPanel.hidden) {
+      this.setIssPanelOpen(false);
+    }
+    this.flightsPanel.hidden = !open;
+    this.flightsToggleBtn.classList.toggle('is-active', open);
+    this.flightsToggleBtn.setAttribute('aria-expanded', String(open));
+    if (open) {
+      this.lastFlightsListRenderMs = 0;
+      this.updateFlightsDrawer(this.engine.getAircraftSnapshot(), null, true);
     }
   }
 
@@ -1088,11 +1189,19 @@ export class HudController {
     this.inspectSubtitle.textContent = telemetry.subtitle;
     this.inspectAltAz.textContent = `${telemetry.altDeg >= 0 ? '+' : ''}${telemetry.altDeg.toFixed(1)}° / ${telemetry.azDeg.toFixed(1)}° ${telemetry.azCardinal}`;
     this.inspectRaDec.textContent = `${telemetry.raFormatted} · ${telemetry.decFormatted}`;
+    const isAircraft = telemetry.kind === 'aircraft';
+    this.inspectMagLabel.textContent = isAircraft ? 'ALTITUDE' : 'VISUAL MAG';
+    this.inspectRiseLabel.textContent = isAircraft ? 'FLIGHT LEVEL' : 'RISE';
+    this.inspectTransitLabel.textContent = isAircraft ? 'HEADING' : 'TRANSIT';
+    this.inspectSetLabel.textContent = isAircraft ? 'VERT RATE' : 'SET';
+
     this.inspectMag.textContent = telemetry.vmagFormatted;
     this.inspectDist.textContent = telemetry.distanceLabel;
     this.inspectSpectral.textContent = telemetry.spectralOrMorphology;
     this.inspectRise.textContent = telemetry.rts.rise;
-    this.inspectTransit.textContent = `${telemetry.rts.transit} (${Math.round(telemetry.rts.transitAltDeg)}°)`;
+    this.inspectTransit.textContent = isAircraft
+      ? telemetry.rts.transit
+      : `${telemetry.rts.transit} (${Math.round(telemetry.rts.transitAltDeg)}°)`;
     this.inspectSet.textContent = telemetry.rts.set;
     this.inspectAirmass.textContent = telemetry.airmass !== null ? `${telemetry.airmass.toFixed(2)}×` : '—';
     this.inspectDescription.textContent = telemetry.description;
@@ -1194,8 +1303,122 @@ export class HudController {
       snapshot.satellites,
       snapshot.selectedObject?.id ?? null,
     );
+    const isLiveRadarWindow = Math.abs(snapshot.observedDate.getTime() - Date.now()) <= 120_000;
+    this.updateFlightsDrawer(
+      snapshot.aircraft,
+      snapshot.selectedObject?.id ?? null,
+      isLiveRadarWindow,
+    );
     this.updateArBanner(snapshot.arGyro);
     this.renderProjectedLabels(snapshot.labels);
+  }
+
+  private updateFlightsDrawer(
+    acSnap: AircraftSystemSnapshot,
+    selectedId: string | null,
+    isLiveRadarWindow: boolean,
+  ): void {
+    if (this.flightsPanel.hidden) return;
+
+    const sourceNames: Record<AircraftSystemSnapshot['source'], string> = {
+      'adsb-fi': 'Open ADS-B · adsb.fi',
+      'adsb-lol': 'Open ADS-B · adsb.lol',
+      opensky: 'OpenSky Network',
+      'adsb-cache': 'ADS-B Cached Radar',
+      'simulated-corridor': 'Regional Corridor Sim',
+    };
+    const pauseTag = isLiveRadarWindow ? '' : ' · Paused (Time Machine)';
+    this.flightsSourceLabel.textContent = `${sourceNames[acSnap.source]} · ${acSnap.aboveHorizonCount} above horizon${pauseTag}`;
+    this.flightsListHeading.textContent = `Live Airborne Traffic (${acSnap.aboveHorizonCount} visible / ${acSnap.totalInRange} in range)`;
+
+    const top = acSnap.aircraft.find((a) => a.isAboveHorizon) ?? acSnap.aircraft[0];
+    if (top) {
+      this.flightsClosestBadge.textContent = `${top.typeCode || 'ADS-B'} · ${top.flightLevel}`;
+      this.flightsClosestName.textContent = top.operator ? `${top.callsign} · ${top.operator}` : top.callsign;
+      this.flightsClosestPhase.textContent = top.flightPhase.toUpperCase();
+      this.flightsClosestPhase.classList.toggle('badge-horizon', top.isAboveHorizon);
+      this.flightsClosestAltAz.textContent = `ALT ${top.altDeg >= 0 ? '+' : ''}${top.altDeg.toFixed(1)}° · AZ ${top.azDeg.toFixed(1)}° ${top.azCardinal}`;
+      this.flightsClosestMetrics.textContent = `Slant ${top.slantRangeKm.toFixed(1)} km · ${Math.round(top.groundSpeedKt)} kt · HDG ${Math.round(top.trackDeg)}° ${top.trackCardinal}`;
+    } else {
+      this.flightsClosestBadge.textContent = 'ADS-B';
+      this.flightsClosestName.textContent = 'No airborne traffic in range';
+      this.flightsClosestPhase.textContent = 'IDLE';
+      this.flightsClosestAltAz.textContent = 'ALT — · AZ —';
+      this.flightsClosestMetrics.textContent = 'Slant — km · — kt · HDG —';
+    }
+
+    const nowMs = performance.now();
+    if (nowMs - this.lastFlightsListRenderMs >= 750) {
+      this.lastFlightsListRenderMs = nowMs;
+      this.renderFlightsCatalogList(acSnap.aircraft, selectedId);
+    }
+  }
+
+  private renderFlightsCatalogList(
+    aircraft: AircraftTelemetryState[],
+    selectedId: string | null,
+  ): void {
+    const visibleSlice = aircraft.slice(0, 35);
+    const activeHexes = new Set<string>();
+
+    for (const ac of visibleSlice) {
+      activeHexes.add(ac.hex);
+      let row = this.flightsRowPool.get(ac.hex);
+      if (!row) {
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tour-stop-btn';
+
+        const main = document.createElement('span');
+        main.className = 'tour-stop-main';
+        const titleEl = document.createElement('span');
+        titleEl.className = 'tour-stop-title';
+        const subEl = document.createElement('span');
+        subEl.className = 'tour-stop-sub';
+        main.append(titleEl, subEl);
+
+        const meta = document.createElement('span');
+        meta.className = 'tour-stop-meta mono';
+        const posEl = document.createElement('span');
+        const altEl = document.createElement('span');
+        meta.append(posEl, altEl);
+
+        btn.append(main, meta);
+        const hex = ac.hex;
+        const id = ac.id;
+        btn.addEventListener('click', () => {
+          this.engine.setLayers({ aircraft: true });
+          this.syncLayerToggleButtons();
+          this.engine.selectObject(
+            { id, kind: 'aircraft', aircraftHex: hex },
+            { flyTo: true, track: true, fovDeg: 40 },
+          );
+        });
+        li.appendChild(btn);
+        row = { li, btn, titleEl, subEl, posEl, altEl };
+        this.flightsRowPool.set(ac.hex, row);
+      }
+
+      row.btn.classList.toggle('is-active', selectedId === ac.id);
+      row.titleEl.textContent = ac.typeCode ? `${ac.callsign} · ${ac.typeCode}` : ac.callsign;
+      const opText = ac.operator || ac.modelDesc || ac.flightPhase;
+      row.subEl.textContent = `${opText} · ${Math.round(ac.groundSpeedKt)} kt · ${ac.slantRangeKm.toFixed(1)} km`;
+      row.posEl.textContent = ac.isAboveHorizon
+        ? `${ac.altDeg.toFixed(0)}° ${ac.azCardinal}`
+        : `Below (${ac.altDeg.toFixed(0)}°)`;
+      row.altEl.textContent = ac.flightLevel;
+
+      // Re-append in sorted priority order without recreating nodes
+      this.flightsCatalogListEl.appendChild(row.li);
+    }
+
+    for (const [hex, row] of this.flightsRowPool.entries()) {
+      if (!activeHexes.has(hex)) {
+        row.li.remove();
+        this.flightsRowPool.delete(hex);
+      }
+    }
   }
 
   private renderProjectedLabels(items: ScreenLabelItem[]): void {
