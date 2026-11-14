@@ -118,13 +118,13 @@
         </div>
       </section>
 
-      <!-- Calm / Relax Mode Campfire, Music & Meteor Controls Banner -->
+      <!-- Calm / Relax Mode Campfire, Nature Sounds & Meteor Controls Banner -->
       <section id="calm-hud-banner" class="hud-panel calm-hud-banner" hidden>
         <div class="calm-banner-top">
           <div class="calm-hud-status">
             <span class="badge badge-calm">🔥 CAMPFIRE</span>
             <span id="calm-meteor-count" class="calm-meteor-count mono">0 meteors</span>
-            <span id="calm-status-text" class="calm-status-text">Hearth &amp; ambient sky</span>
+            <span id="calm-status-text" class="calm-status-text">Hearth &amp; nature sounds</span>
           </div>
           <div class="calm-quick-actions" role="group" aria-label="Calm mode quick actions">
             <button id="calm-wish-btn" type="button" class="chip-btn is-calm-accent">✦ Meteor</button>
@@ -135,10 +135,12 @@
         </div>
 
         <div class="calm-banner-strip">
-          <div class="calm-hud-audio" role="group" aria-label="Campfire and ambient music audio">
-            <button id="calm-audio-preset-both" type="button" class="chip-btn is-active" data-calm-audio="campfire-music" aria-pressed="true">Fire + Music</button>
-            <button id="calm-audio-preset-fire" type="button" class="chip-btn" data-calm-audio="campfire-only" aria-pressed="false">Fire Only</button>
-            <button id="calm-audio-preset-music" type="button" class="chip-btn" data-calm-audio="music-only" aria-pressed="false">Music Only</button>
+          <div class="calm-hud-audio" role="group" aria-label="Campfire and nature sounds">
+            <button id="calm-audio-preset-fire-night" type="button" class="chip-btn is-active" data-calm-audio="fire-night" aria-pressed="true">Fire + Night</button>
+            <button id="calm-audio-preset-fire-birds" type="button" class="chip-btn" data-calm-audio="fire-birds" aria-pressed="false">Fire + Birds</button>
+            <button id="calm-audio-preset-fire" type="button" class="chip-btn" data-calm-audio="fire-only" aria-pressed="false">Fire Only</button>
+            <button id="calm-audio-preset-night" type="button" class="chip-btn" data-calm-audio="night-only" aria-pressed="false">Night Life</button>
+            <button id="calm-audio-preset-birds" type="button" class="chip-btn" data-calm-audio="birds-only" aria-pressed="false">Day Birds</button>
             <button id="calm-audio-mute-btn" type="button" class="chip-btn" aria-pressed="false">Mute</button>
             <div class="calm-volume-wrap">
               <label for="calm-volume-slider" class="sr-only">Calm mode soundscape volume</label>

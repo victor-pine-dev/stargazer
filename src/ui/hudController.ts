@@ -1559,6 +1559,13 @@ export class HudController {
       isLiveRadarWindow,
     );
     this.updateArBanner(snapshot.arGyro);
+    if (snapshot.calmMode.enabled) {
+      const prevPreset = this.calmAudio.getState().preset;
+      const nextAudio = this.calmAudio.syncSkyDaylight(snapshot.sun.altDeg > -2);
+      if (nextAudio.preset !== prevPreset) {
+        this.syncCalmAudioUi(nextAudio);
+      }
+    }
     this.syncCalmModeUi(snapshot.calmMode);
     this.renderProjectedLabels(snapshot.labels);
   }
@@ -1602,7 +1609,7 @@ export class HudController {
 
     const statusText = calmMode.lastMeteorLabel
       ? `Latest: ${calmMode.lastMeteorLabel}`
-      : 'Hearth & ambient sky';
+      : 'Hearth & nature sounds';
     if (this.calmStatusText.textContent !== statusText) {
       this.calmStatusText.textContent = statusText;
     }

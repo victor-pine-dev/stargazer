@@ -1,4 +1,9 @@
-export type CalmAudioPreset = 'campfire-music' | 'campfire-only' | 'music-only';
+export type CalmAudioPreset =
+  | 'fire-night'
+  | 'fire-birds'
+  | 'fire-only'
+  | 'night-only'
+  | 'birds-only';
 
 export interface CalmAudioState {
   isPlaying: boolean;
@@ -7,422 +12,626 @@ export interface CalmAudioState {
   preset: CalmAudioPreset;
 }
 
-const PAD_CHORDS_HZ: ReadonlyArray<readonly [number, number, number, number]> = [
-  [146.83, 220.0, 277.18, 329.63], // Dmaj9 (D3, A3, C#4, E4)
-  [123.47, 185.0, 246.94, 293.66], // Bm11  (B2, F#3, B3, D4)
-  [98.0, 196.0, 246.94, 329.63],   // Gmaj9 (G2, G3, B3, E4)
-  [110.0, 220.0, 277.18, 329.63],  // Aadd9 (A2, A3, C#4, E4)
-];
+const DEFAULT_VOLUME_PERCENT = 65;
+const SCHEDULER_INTERVAL_MS = 180;
+const AMBIENT_LOOP_SECONDS = 6;
+const NOISE_BURST_SECONDS = 0.6;
+const FADE_SECONDS = 0.45;
 
-const CHORD_INTERVAL_MS = 9000;
-
-interface PadVoice {
-  sine: OscillatorNode;
-  triangle: OscillatorNode;
+function clampVolumePercent(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_VOLUME_PERCENT;
+  return Math.max(0, Math.min(100, Math.round(value)));
 }
 
-interface AudioGraphNodes {
-  ctx: AudioContext;
-  masterGain: GainNode;
-  campfireBusGain: GainNode;
-  musicBusGain: GainNode;
-  noiseSource: AudioBufferSourceNode;
-  lfoNodes: OscillatorNode[];
-  padVoices: PadVoice[];
-}
-
-function getAudioContextConstructor(): typeof AudioContext | null {
+function createAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
-  const win = window as unknown as {
-    AudioContext?: typeof AudioContext;
-    webkitAudioContext?: typeof AudioContext;
-  };
-  return win.AudioContext ?? win.webkitAudioContext ?? null;
+  const AudioCtx =
+    window.AudioContext ??
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) return null;
+  try {
+    return new AudioCtx();
+  } catch {
+    return null;
+  }
 }
 
-/**
- * Generates a seamless 4-second stereo noise buffer:
- * - Ch 0: Warm brown/pink low-end hearth airflow
- * - Ch 1: Stochastic wood crackle & ember snap transients
- */
-function createCampfireNoiseBuffer(ctx: AudioContext): AudioBuffer {
-  const durationSec = 4;
-  const sampleCount = Math.floor(ctx.sampleRate * durationSec);
-  const buffer = ctx.createBuffer(2, sampleCount, ctx.sampleRate);
-
-  const rumbleData = buffer.getChannelData(0);
-  const crackleData = buffer.getChannelData(1);
-
-  let brown = 0;
-  let crackleDecay = 0;
-  let crackleSign = 1;
-
-  for (let i = 0; i < sampleCount; i++) {
-    const white = Math.random() * 2 - 1;
-    // Leaky integrator for smooth brown/pink hearth roar
-    brown = (brown + 0.028 * white) / 1.028;
-    rumbleData[i] = Math.max(-1, Math.min(1, brown * 3.1));
-
-    // Sparse stochastic ember pops & wood crackles
-    const trigger = Math.random();
-    if (trigger < 0.0014) {
-      crackleDecay = 0.35 + Math.random() * 0.65;
-      crackleSign = Math.random() < 0.5 ? -1 : 1;
-    } else if (trigger < 0.0045) {
-      crackleDecay = Math.max(crackleDecay, 0.08 + Math.random() * 0.18);
-      crackleSign = Math.random() < 0.5 ? -1 : 1;
-    }
-
-    const impulse = crackleDecay * crackleSign * (0.55 + Math.random() * 0.45);
-    crackleData[i] = Math.max(-1, Math.min(1, impulse + white * 0.018));
-    crackleDecay *= 0.962;
-  }
-
-  // Crossfade edges slightly for click-free looping
-  const fadeSamples = Math.min(512, Math.floor(sampleCount * 0.02));
-  for (let i = 0; i < fadeSamples; i++) {
-    const w = i / fadeSamples;
-    const tailIdx = sampleCount - 1 - i;
-    rumbleData[i] = rumbleData[i] * w + rumbleData[tailIdx] * (1 - w);
-    crackleData[i] *= w;
-    crackleData[tailIdx] *= w;
-  }
-
-  return buffer;
-}
-
-/**
- * Synthesizes a cozy crackling campfire + generative cosmic ambient pad using Web Audio API.
- */
 export class CalmAudioController {
-  private state: CalmAudioState = {
-    isPlaying: false,
-    isMuted: false,
-    volumePercent: 65,
-    preset: 'campfire-music',
-  };
+  private ctx: AudioContext | null = null;
+  private masterGain: GainNode | null = null;
+  private fireGain: GainNode | null = null;
+  private breezeGain: GainNode | null = null;
+  private nightGain: GainNode | null = null;
+  private birdsGain: GainNode | null = null;
 
-  private graph: AudioGraphNodes | null = null;
-  private chordIndex = 0;
-  private chordTimerId: number | null = null;
+  private loopSource: AudioBufferSourceNode | null = null;
+  private noiseBurstBuffer: AudioBuffer | null = null;
+  private schedulerId: number | null = null;
 
-  getState(): CalmAudioState {
-    return { ...this.state };
+  private nextFireAt = 0;
+  private nextSapAt = 0;
+  private nextCricketAt = 0;
+  private nextFrogAt = 0;
+  private nextOwlAt = 0;
+  private nextBirdAt = 0;
+
+  private isPlaying = false;
+  private isMuted = false;
+  private volumePercent = DEFAULT_VOLUME_PERCENT;
+  private preset: CalmAudioPreset = 'fire-night';
+  private lastSkyDaylight: boolean | null = null;
+
+  public getState(): CalmAudioState {
+    return {
+      isPlaying: this.isPlaying,
+      isMuted: this.isMuted,
+      volumePercent: this.volumePercent,
+      preset: this.preset,
+    };
   }
 
-  async start(): Promise<CalmAudioState> {
-    this.state.isPlaying = true;
-
-    const AudioCtx = getAudioContextConstructor();
-    if (!AudioCtx) {
+  public async start(): Promise<CalmAudioState> {
+    this.isPlaying = true;
+    const ctx = this.ensureGraph();
+    if (!ctx) {
       return this.getState();
     }
 
-    if (!this.graph) {
-      this.graph = this.buildAudioGraph(new AudioCtx());
-    }
-
-    const { ctx } = this.graph;
     if (ctx.state === 'suspended') {
       try {
         await ctx.resume();
       } catch {
-        // Ignore autoplay resume rejection until next user gesture
+        // Browsers may block resume until a user gesture occurs.
       }
     }
 
+    this.resetScheduleHorizons(ctx.currentTime);
+    this.startScheduler();
     this.applyGains();
-    this.startChordProgressionTimer();
     return this.getState();
   }
 
-  stop(): CalmAudioState {
-    this.state.isPlaying = false;
-    this.stopChordProgressionTimer();
+  public stop(): CalmAudioState {
+    this.isPlaying = false;
+    this.stopScheduler();
+    if (this.ctx && this.masterGain) {
+      this.masterGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.2);
+    }
+    return this.getState();
+  }
 
-    if (this.graph) {
-      const { ctx, masterGain } = this.graph;
-      const now = ctx.currentTime;
-      masterGain.gain.cancelScheduledValues(now);
-      masterGain.gain.setTargetAtTime(0, now, 0.14);
+  public setMuted(muted: boolean): CalmAudioState {
+    this.isMuted = Boolean(muted);
+    this.applyGains();
+    return this.getState();
+  }
+
+  public toggleMuted(): CalmAudioState {
+    return this.setMuted(!this.isMuted);
+  }
+
+  public setVolume(volumePercent: number): CalmAudioState {
+    this.volumePercent = clampVolumePercent(volumePercent);
+    this.applyGains();
+    return this.getState();
+  }
+
+  public setPreset(preset: CalmAudioPreset): CalmAudioState {
+    this.preset = preset;
+    if (this.ctx && this.isPlaying) {
+      this.resetScheduleHorizons(this.ctx.currentTime);
+    }
+    this.applyGains();
+    return this.getState();
+  }
+
+  public syncSkyDaylight(isDaylight: boolean): CalmAudioState {
+    if (this.lastSkyDaylight === null) {
+      this.lastSkyDaylight = isDaylight;
+      return this.getState();
+    }
+
+    if (this.lastSkyDaylight !== isDaylight) {
+      this.lastSkyDaylight = isDaylight;
+      if (isDaylight) {
+        if (this.preset === 'fire-night') this.preset = 'fire-birds';
+        else if (this.preset === 'night-only') this.preset = 'birds-only';
+      } else {
+        if (this.preset === 'fire-birds') this.preset = 'fire-night';
+        else if (this.preset === 'birds-only') this.preset = 'night-only';
+      }
+      if (this.ctx && this.isPlaying) {
+        this.resetScheduleHorizons(this.ctx.currentTime);
+      }
+      this.applyGains();
     }
 
     return this.getState();
   }
 
-  setMuted(muted: boolean): CalmAudioState {
-    this.state.isMuted = muted;
-    this.applyGains();
-    return this.getState();
-  }
+  public dispose(): void {
+    this.isPlaying = false;
+    this.stopScheduler();
 
-  toggleMuted(): CalmAudioState {
-    return this.setMuted(!this.state.isMuted);
-  }
-
-  setVolume(volumePercent: number): CalmAudioState {
-    const clamped = Math.max(0, Math.min(100, Math.round(volumePercent)));
-    this.state.volumePercent = clamped;
-    this.applyGains();
-    return this.getState();
-  }
-
-  setPreset(preset: CalmAudioPreset): CalmAudioState {
-    this.state.preset = preset;
-    this.applyGains();
-    return this.getState();
-  }
-
-  dispose(): void {
-    this.stopChordProgressionTimer();
-    this.state.isPlaying = false;
-
-    if (!this.graph) return;
-    const { ctx, noiseSource, lfoNodes, padVoices } = this.graph;
     try {
-      noiseSource.stop();
+      this.loopSource?.stop();
     } catch {
-      // Ignore already-stopped source
+      // Node may already be stopped.
     }
-    for (const lfo of lfoNodes) {
-      try {
-        lfo.stop();
-      } catch {
-        // Ignore already-stopped LFO
-      }
+    this.loopSource = null;
+    this.noiseBurstBuffer = null;
+
+    if (this.ctx) {
+      void this.ctx.close().catch(() => undefined);
     }
-    for (const voice of padVoices) {
-      try {
-        voice.sine.stop();
-        voice.triangle.stop();
-      } catch {
-        // Ignore already-stopped oscillator
-      }
-    }
-    void ctx.close().catch(() => {});
-    this.graph = null;
+    this.ctx = null;
+    this.masterGain = null;
+    this.fireGain = null;
+    this.breezeGain = null;
+    this.nightGain = null;
+    this.birdsGain = null;
   }
 
-  private buildAudioGraph(ctx: AudioContext): AudioGraphNodes {
+  private ensureGraph(): AudioContext | null {
+    if (this.ctx) return this.ctx;
+    const ctx = createAudioContext();
+    if (!ctx) return null;
+    this.ctx = ctx;
+
     const masterGain = ctx.createGain();
     masterGain.gain.value = 0;
+    masterGain.connect(ctx.destination);
+    this.masterGain = masterGain;
 
-    // Gentle soft limiter/compressor on master output to prevent peaks
-    const compressor = ctx.createDynamicsCompressor();
-    compressor.threshold.value = -16;
-    compressor.knee.value = 18;
-    compressor.ratio.value = 3.5;
-    compressor.attack.value = 0.01;
-    compressor.release.value = 0.25;
+    const fireGain = ctx.createGain();
+    fireGain.gain.value = 0;
+    fireGain.connect(masterGain);
+    this.fireGain = fireGain;
 
-    masterGain.connect(compressor);
-    compressor.connect(ctx.destination);
+    const breezeGain = ctx.createGain();
+    breezeGain.gain.value = 0;
+    breezeGain.connect(masterGain);
+    this.breezeGain = breezeGain;
 
-    // 1. Campfire Bus (Warm brown rumble + crackling ember snaps)
-    const campfireBusGain = ctx.createGain();
-    campfireBusGain.gain.value = 0;
-    campfireBusGain.connect(masterGain);
+    const nightGain = ctx.createGain();
+    nightGain.gain.value = 0;
+    nightGain.connect(masterGain);
+    this.nightGain = nightGain;
 
-    const noiseBuffer = createCampfireNoiseBuffer(ctx);
-    const noiseSource = ctx.createBufferSource();
-    noiseSource.buffer = noiseBuffer;
-    noiseSource.loop = true;
+    const birdsGain = ctx.createGain();
+    birdsGain.gain.value = 0;
+    birdsGain.connect(masterGain);
+    this.birdsGain = birdsGain;
+
+    this.noiseBurstBuffer = this.buildNoiseBurstBuffer(ctx);
+    this.startAmbientLoop(ctx, fireGain, breezeGain);
+    return ctx;
+  }
+
+  private startAmbientLoop(
+    ctx: AudioContext,
+    fireGain: GainNode,
+    breezeGain: GainNode
+  ): void {
+    const sampleRate = ctx.sampleRate;
+    const frameCount = Math.floor(sampleRate * AMBIENT_LOOP_SECONDS);
+    const fadeFrames = Math.floor(sampleRate * 0.25);
+    const totalFrames = frameCount + fadeFrames;
+
+    const rawFire = new Float32Array(totalFrames);
+    const rawBreeze = new Float32Array(totalFrames);
+
+    let rumble = 0;
+    let emberLp = 0;
+    let crackleEnv = 0;
+    let breezeLp = 0;
+    let breezeAir = 0;
+
+    for (let i = 0; i < totalFrames; i += 1) {
+      const white = Math.random() * 2 - 1;
+      rumble = rumble * 0.992 + white * 0.045;
+      emberLp = emberLp * 0.94 + white * 0.08;
+
+      if (Math.random() < 0.0045) {
+        crackleEnv = 0.22 + Math.random() * 0.35;
+      } else {
+        crackleEnv *= 0.965;
+      }
+      const emberPop = white * crackleEnv;
+      rawFire[i] = Math.max(-0.9, Math.min(0.9, rumble * 1.45 + (emberLp - rumble) * 0.65 + emberPop * 0.42));
+
+      const windWhite = Math.random() * 2 - 1;
+      breezeLp = breezeLp * 0.985 + windWhite * 0.025;
+      breezeAir = breezeAir * 0.88 + windWhite * 0.022;
+      const cycle = (2 * Math.PI * (i % frameCount)) / frameCount;
+      const swell = 0.62 + 0.38 * Math.sin(cycle) * Math.sin(cycle * 0.5 + 0.7);
+      rawBreeze[i] = Math.max(-0.8, Math.min(0.8, (breezeLp * 1.15 + breezeAir * 0.4) * swell));
+    }
+
+    const buffer = ctx.createBuffer(2, frameCount, sampleRate);
+    const outFire = buffer.getChannelData(0);
+    const outBreeze = buffer.getChannelData(1);
+
+    // Crossfade the final tail back into the head so the 6s loop wraps without clicks.
+    for (let i = 0; i < frameCount; i += 1) {
+      if (i < fadeFrames) {
+        const blend = i / fadeFrames;
+        outFire[i] = rawFire[i] * blend + rawFire[frameCount + i] * (1 - blend);
+        outBreeze[i] = rawBreeze[i] * blend + rawBreeze[frameCount + i] * (1 - blend);
+      } else {
+        outFire[i] = rawFire[i];
+        outBreeze[i] = rawBreeze[i];
+      }
+    }
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
 
     const splitter = ctx.createChannelSplitter(2);
-    noiseSource.connect(splitter);
+    source.connect(splitter);
 
-    // Layer A: Warm hearth rumble (175 Hz lowpass + 0.28 Hz gentle LFO)
-    const rumbleLowpass = ctx.createBiquadFilter();
-    rumbleLowpass.type = 'lowpass';
-    rumbleLowpass.frequency.value = 175;
-    rumbleLowpass.Q.value = 0.65;
+    const hearthFilter = ctx.createBiquadFilter();
+    hearthFilter.type = 'lowpass';
+    hearthFilter.frequency.value = 1850;
+    splitter.connect(hearthFilter, 0);
+    hearthFilter.connect(fireGain);
 
-    const rumbleGain = ctx.createGain();
-    rumbleGain.gain.value = 0.42;
+    const breezeFilter = ctx.createBiquadFilter();
+    breezeFilter.type = 'bandpass';
+    breezeFilter.frequency.value = 390;
+    breezeFilter.Q.value = 0.65;
+    splitter.connect(breezeFilter, 1);
+    breezeFilter.connect(breezeGain);
 
-    const rumbleLfo = ctx.createOscillator();
-    rumbleLfo.type = 'sine';
-    rumbleLfo.frequency.value = 0.28;
-    const rumbleLfoDepth = ctx.createGain();
-    rumbleLfoDepth.gain.value = 0.1;
-    rumbleLfo.connect(rumbleLfoDepth);
-    rumbleLfoDepth.connect(rumbleGain.gain);
-
-    splitter.connect(rumbleLowpass, 0);
-    rumbleLowpass.connect(rumbleGain);
-    rumbleGain.connect(campfireBusGain);
-
-    // Layer B: Wood crackle & ember snap (900 Hz highpass -> 1650 Hz resonant bandpass)
-    const crackleHighpass = ctx.createBiquadFilter();
-    crackleHighpass.type = 'highpass';
-    crackleHighpass.frequency.value = 900;
-
-    const crackleBandpass = ctx.createBiquadFilter();
-    crackleBandpass.type = 'bandpass';
-    crackleBandpass.frequency.value = 1650;
-    crackleBandpass.Q.value = 2.2;
-
-    const crackleGain = ctx.createGain();
-    crackleGain.gain.value = 0.34;
-
-    splitter.connect(crackleHighpass, 1);
-    crackleHighpass.connect(crackleBandpass);
-    crackleBandpass.connect(crackleGain);
-    crackleGain.connect(campfireBusGain);
-
-    // 2. Ambient Stargazing Music Pad Bus
-    const musicBusGain = ctx.createGain();
-    musicBusGain.gain.value = 0;
-    musicBusGain.connect(masterGain);
-
-    const padFilter = ctx.createBiquadFilter();
-    padFilter.type = 'lowpass';
-    padFilter.frequency.value = 520;
-    padFilter.Q.value = 0.7;
-
-    // Slow breathing LFO on pad warmth filter
-    const padFilterLfo = ctx.createOscillator();
-    padFilterLfo.type = 'sine';
-    padFilterLfo.frequency.value = 0.09;
-    const padFilterDepth = ctx.createGain();
-    padFilterDepth.gain.value = 140;
-    padFilterLfo.connect(padFilterDepth);
-    padFilterDepth.connect(padFilter.frequency);
-
-    // Stereo ping-pong / ambient tail delay (0.38s L, 0.52s R, lowpass-damped feedback 0.32)
-    const dryGain = ctx.createGain();
-    dryGain.gain.value = 0.75;
-    padFilter.connect(dryGain);
-    dryGain.connect(musicBusGain);
-
-    const delayL = ctx.createDelay(1.0);
-    delayL.delayTime.value = 0.38;
-    const delayR = ctx.createDelay(1.0);
-    delayR.delayTime.value = 0.52;
-
-    const feedbackDampL = ctx.createBiquadFilter();
-    feedbackDampL.type = 'lowpass';
-    feedbackDampL.frequency.value = 950;
-    const feedbackDampR = ctx.createBiquadFilter();
-    feedbackDampR.type = 'lowpass';
-    feedbackDampR.frequency.value = 950;
-
-    const fbGainL = ctx.createGain();
-    fbGainL.gain.value = 0.32;
-    const fbGainR = ctx.createGain();
-    fbGainR.gain.value = 0.32;
-
-    const wetMerger = ctx.createChannelMerger(2);
-    const wetGain = ctx.createGain();
-    wetGain.gain.value = 0.42;
-
-    padFilter.connect(delayL);
-    padFilter.connect(delayR);
-
-    delayL.connect(feedbackDampL);
-    feedbackDampL.connect(fbGainL);
-    fbGainL.connect(delayR);
-
-    delayR.connect(feedbackDampR);
-    feedbackDampR.connect(fbGainR);
-    fbGainR.connect(delayL);
-
-    delayL.connect(wetMerger, 0, 0);
-    delayR.connect(wetMerger, 0, 1);
-    wetMerger.connect(wetGain);
-    wetGain.connect(musicBusGain);
-
-    const initialChord = PAD_CHORDS_HZ[0];
-    const padVoices: PadVoice[] = initialChord.map((freq, idx) => {
-      const sine = ctx.createOscillator();
-      sine.type = 'sine';
-      sine.frequency.value = freq;
-      sine.detune.value = (idx - 1.5) * 3.5;
-
-      const triangle = ctx.createOscillator();
-      triangle.type = 'triangle';
-      triangle.frequency.value = freq;
-      triangle.detune.value = (1.5 - idx) * 5.0;
-
-      const sineGain = ctx.createGain();
-      sineGain.gain.value = idx === 0 ? 0.14 : 0.1;
-      const triGain = ctx.createGain();
-      triGain.gain.value = 0.045;
-
-      sine.connect(sineGain);
-      triangle.connect(triGain);
-      sineGain.connect(padFilter);
-      triGain.connect(padFilter);
-
-      sine.start();
-      triangle.start();
-      return { sine, triangle };
-    });
-
-    noiseSource.start();
-    rumbleLfo.start();
-    padFilterLfo.start();
-
-    return {
-      ctx,
-      masterGain,
-      campfireBusGain,
-      musicBusGain,
-      noiseSource,
-      lfoNodes: [rumbleLfo, padFilterLfo],
-      padVoices,
-    };
+    source.start();
+    this.loopSource = source;
   }
 
-  private startChordProgressionTimer(): void {
-    if (this.chordTimerId !== null || typeof window === 'undefined') return;
-    this.chordTimerId = window.setInterval(() => {
-      this.advanceChord();
-    }, CHORD_INTERVAL_MS);
-  }
-
-  private stopChordProgressionTimer(): void {
-    if (this.chordTimerId !== null && typeof window !== 'undefined') {
-      window.clearInterval(this.chordTimerId);
-      this.chordTimerId = null;
+  private buildNoiseBurstBuffer(ctx: AudioContext): AudioBuffer {
+    const sampleRate = ctx.sampleRate;
+    const frameCount = Math.max(1, Math.floor(sampleRate * NOISE_BURST_SECONDS));
+    const buffer = ctx.createBuffer(1, frameCount, sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < frameCount; i += 1) {
+      data[i] = Math.random() * 2 - 1;
     }
-  }
-
-  private advanceChord(): void {
-    if (!this.graph || !this.state.isPlaying) return;
-    this.chordIndex = (this.chordIndex + 1) % PAD_CHORDS_HZ.length;
-    const chord = PAD_CHORDS_HZ[this.chordIndex];
-    const now = this.graph.ctx.currentTime;
-
-    this.graph.padVoices.forEach((voice, idx) => {
-      const freq = chord[idx] ?? chord[0];
-      voice.sine.frequency.setTargetAtTime(freq, now, 1.8);
-      voice.triangle.frequency.setTargetAtTime(freq, now, 1.8);
-    });
+    return buffer;
   }
 
   private applyGains(): void {
-    if (!this.graph) return;
-    const { ctx, masterGain, campfireBusGain, musicBusGain } = this.graph;
-    const now = ctx.currentTime;
+    if (!this.ctx || !this.masterGain || !this.fireGain || !this.breezeGain || !this.nightGain || !this.birdsGain) {
+      return;
+    }
 
-    const effectiveMaster =
-      !this.state.isPlaying || this.state.isMuted
-        ? 0
-        : (this.state.volumePercent / 100) * 0.85;
+    const now = this.ctx.currentTime;
+    const effectiveMaster = !this.isPlaying || this.isMuted ? 0 : (this.volumePercent / 100) * 0.72;
 
-    const fireLevel =
-      this.state.preset === 'music-only' ? 0 : 0.72;
-    const musicLevel =
-      this.state.preset === 'campfire-only' ? 0 : 0.56;
+    const hasFire =
+      this.preset === 'fire-night' ||
+      this.preset === 'fire-birds' ||
+      this.preset === 'fire-only';
+    const hasNight = this.preset === 'fire-night' || this.preset === 'night-only';
+    const hasBirds = this.preset === 'fire-birds' || this.preset === 'birds-only';
 
-    masterGain.gain.cancelScheduledValues(now);
-    masterGain.gain.setTargetAtTime(effectiveMaster, now, 0.16);
+    const fireLevel = hasFire ? 0.85 : 0;
+    const breezeLevel = hasNight || hasBirds ? 0.34 : 0.14;
+    const nightLevel = hasNight ? 0.78 : 0;
+    const birdsLevel = hasBirds ? 0.78 : 0;
 
-    campfireBusGain.gain.cancelScheduledValues(now);
-    campfireBusGain.gain.setTargetAtTime(fireLevel, now, 0.18);
+    this.masterGain.gain.setTargetAtTime(effectiveMaster, now, 0.18);
+    this.fireGain.gain.setTargetAtTime(fireLevel, now, FADE_SECONDS);
+    this.breezeGain.gain.setTargetAtTime(breezeLevel, now, FADE_SECONDS);
+    this.nightGain.gain.setTargetAtTime(nightLevel, now, FADE_SECONDS);
+    this.birdsGain.gain.setTargetAtTime(birdsLevel, now, FADE_SECONDS);
+  }
 
-    musicBusGain.gain.cancelScheduledValues(now);
-    musicBusGain.gain.setTargetAtTime(musicLevel, now, 0.22);
+  private resetScheduleHorizons(now: number): void {
+    this.nextFireAt = now + 0.08 + Math.random() * 0.25;
+    this.nextSapAt = now + 0.9 + Math.random() * 1.4;
+    this.nextCricketAt = now + 0.25 + Math.random() * 0.7;
+    this.nextFrogAt = now + 2.2 + Math.random() * 2.8;
+    this.nextOwlAt = now + 5.5 + Math.random() * 6.5;
+    this.nextBirdAt = now + 0.2 + Math.random() * 0.7;
+  }
+
+  private startScheduler(): void {
+    if (typeof window === 'undefined' || this.schedulerId !== null) return;
+    this.schedulerId = window.setInterval(() => {
+      this.scheduleTick();
+    }, SCHEDULER_INTERVAL_MS);
+  }
+
+  private stopScheduler(): void {
+    if (typeof window === 'undefined' || this.schedulerId === null) return;
+    window.clearInterval(this.schedulerId);
+    this.schedulerId = null;
+  }
+
+  private scheduleTick(): void {
+    if (!this.isPlaying || !this.ctx || this.ctx.state !== 'running') return;
+    const now = this.ctx.currentTime;
+    const horizon = now + 0.32;
+
+    const hasFire =
+      this.preset === 'fire-night' ||
+      this.preset === 'fire-birds' ||
+      this.preset === 'fire-only';
+    const hasNight = this.preset === 'fire-night' || this.preset === 'night-only';
+    const hasBirds = this.preset === 'fire-birds' || this.preset === 'birds-only';
+
+    if (hasFire) {
+      while (this.nextFireAt < horizon) {
+        this.triggerFireSnap(this.nextFireAt);
+        if (Math.random() < 0.32) {
+          this.triggerFireSnap(this.nextFireAt + 0.016 + Math.random() * 0.032, 0.75);
+        }
+        this.nextFireAt += 0.14 + Math.random() * 0.52;
+      }
+
+      if (this.nextSapAt < horizon) {
+        this.triggerSapSizzle(this.nextSapAt);
+        this.nextSapAt = Math.max(horizon, this.nextSapAt) + 1.8 + Math.random() * 3.4;
+      }
+    }
+
+    if (hasNight) {
+      if (this.nextCricketAt < horizon) {
+        this.triggerCricketChirp(this.nextCricketAt);
+        this.nextCricketAt = Math.max(horizon, this.nextCricketAt) + 0.55 + Math.random() * 1.15;
+      }
+
+      if (this.nextFrogAt < horizon) {
+        this.triggerTreeFrog(this.nextFrogAt);
+        this.nextFrogAt = Math.max(horizon, this.nextFrogAt) + 3.4 + Math.random() * 4.6;
+      }
+
+      if (this.nextOwlAt < horizon) {
+        this.triggerOwlHoot(this.nextOwlAt);
+        this.nextOwlAt = Math.max(horizon, this.nextOwlAt) + 10.5 + Math.random() * 9.0;
+      }
+    }
+
+    if (hasBirds && this.nextBirdAt < horizon) {
+      const roll = Math.random();
+      if (roll < 0.36) {
+        this.triggerChickadee(this.nextBirdAt);
+      } else if (roll < 0.76) {
+        this.triggerSongbirdPhrase(this.nextBirdAt);
+      } else {
+        this.triggerThrushCall(this.nextBirdAt);
+      }
+      this.nextBirdAt = Math.max(horizon, this.nextBirdAt) + 1.4 + Math.random() * 2.8;
+    }
+  }
+
+  private connectWithPan(source: AudioNode, target: AudioNode, pan: number): void {
+    if (!this.ctx) return;
+    if (typeof this.ctx.createStereoPanner === 'function') {
+      const panner = this.ctx.createStereoPanner();
+      panner.pan.value = Math.max(-1, Math.min(1, pan));
+      source.connect(panner);
+      panner.connect(target);
+      return;
+    }
+    source.connect(target);
+  }
+
+  private triggerFireSnap(at: number, amplitudeScale = 1): void {
+    if (!this.ctx || !this.fireGain || !this.noiseBurstBuffer) return;
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBurstBuffer;
+
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 1400 + Math.random() * 2100;
+    filter.Q.value = 2.0 + Math.random() * 3.2;
+
+    const gain = this.ctx.createGain();
+    const peak = (0.16 + Math.random() * 0.28) * amplitudeScale;
+    const decay = 0.006 + Math.random() * 0.011;
+
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.linearRampToValueAtTime(peak, at + 0.0014);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + decay);
+
+    src.connect(filter);
+    filter.connect(gain);
+    this.connectWithPan(gain, this.fireGain, (Math.random() - 0.5) * 0.45);
+
+    const offset = Math.random() * Math.max(0.05, NOISE_BURST_SECONDS - 0.08);
+    src.start(at, offset, decay + 0.02);
+  }
+
+  private triggerSapSizzle(at: number): void {
+    if (!this.ctx || !this.fireGain || !this.noiseBurstBuffer) return;
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBurstBuffer;
+
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'highpass';
+    filter.frequency.value = 2750 + Math.random() * 1400;
+
+    const gain = this.ctx.createGain();
+    const duration = 0.085 + Math.random() * 0.075;
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.linearRampToValueAtTime(0.065 + Math.random() * 0.05, at + 0.014);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + duration);
+
+    src.connect(filter);
+    filter.connect(gain);
+    this.connectWithPan(gain, this.fireGain, (Math.random() - 0.5) * 0.35);
+
+    const offset = Math.random() * Math.max(0.05, NOISE_BURST_SECONDS - duration - 0.04);
+    src.start(at, offset, duration + 0.02);
+  }
+
+  private triggerCricketChirp(at: number): void {
+    if (!this.ctx || !this.nightGain) return;
+
+    const voices = [
+      { freq: 4180, pan: -0.64 },
+      { freq: 4440, pan: 0.58 },
+      { freq: 3120, pan: 0.24 },
+    ];
+    const voice = voices[Math.floor(Math.random() * voices.length)]!;
+    const pulseCount = 3 + Math.floor(Math.random() * 3);
+    const pulseLen = 0.019;
+    const pulseGap = 0.03;
+
+    const osc = this.ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.value = voice.freq + (Math.random() - 0.5) * 35;
+
+    const bandpass = this.ctx.createBiquadFilter();
+    bandpass.type = 'bandpass';
+    bandpass.frequency.value = voice.freq;
+    bandpass.Q.value = 4.2;
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, at);
+
+    const peak = 0.045 + Math.random() * 0.025;
+    for (let i = 0; i < pulseCount; i += 1) {
+      const pStart = at + i * pulseGap;
+      gain.gain.setValueAtTime(0.0001, pStart);
+      gain.gain.linearRampToValueAtTime(peak, pStart + 0.0045);
+      gain.gain.linearRampToValueAtTime(0.0001, pStart + pulseLen);
+    }
+
+    osc.connect(bandpass);
+    bandpass.connect(gain);
+    this.connectWithPan(gain, this.nightGain, voice.pan);
+
+    const totalEnd = at + pulseCount * pulseGap + 0.03;
+    osc.start(at);
+    osc.stop(totalEnd);
+  }
+
+  private triggerTreeFrog(at: number): void {
+    if (!this.ctx || !this.nightGain) return;
+    const pan = (Math.random() < 0.5 ? -1 : 1) * (0.35 + Math.random() * 0.45);
+    const peeps = Math.random() < 0.45 ? 2 : 1;
+
+    for (let i = 0; i < peeps; i += 1) {
+      const t = at + i * 0.145;
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1820, t);
+      osc.frequency.exponentialRampToValueAtTime(2180, t + 0.052);
+
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.linearRampToValueAtTime(0.042, t + 0.011);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.058);
+
+      osc.connect(gain);
+      this.connectWithPan(gain, this.nightGain, pan);
+      osc.start(t);
+      osc.stop(t + 0.068);
+    }
+  }
+
+  private triggerOwlHoot(at: number): void {
+    if (!this.ctx || !this.nightGain) return;
+    const pan = (Math.random() < 0.5 ? -1 : 1) * (0.45 + Math.random() * 0.35);
+    const notes = [
+      { offset: 0, dur: 0.32, startHz: 350, endHz: 318 },
+      { offset: 0.52, dur: 0.15, startHz: 342, endHz: 332 },
+      { offset: 0.74, dur: 0.38, startHz: 340, endHz: 298 },
+    ];
+
+    for (const note of notes) {
+      const t = at + note.offset;
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(note.startHz, t);
+      osc.frequency.exponentialRampToValueAtTime(note.endHz, t + note.dur);
+
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 520;
+
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.linearRampToValueAtTime(0.046, t + 0.055);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + note.dur);
+
+      osc.connect(filter);
+      filter.connect(gain);
+      this.connectWithPan(gain, this.nightGain, pan);
+      osc.start(t);
+      osc.stop(t + note.dur + 0.02);
+    }
+  }
+
+  private triggerChickadee(at: number): void {
+    if (!this.ctx || !this.birdsGain) return;
+    const pan = (Math.random() - 0.5) * 1.4;
+    const base = 3350 + Math.random() * 240;
+
+    this.scheduleBirdTone(at, 0.21, base, base * 0.98, 0.05, pan);
+    this.scheduleBirdTone(at + 0.31, 0.27, base * 0.795, base * 0.78, 0.052, pan);
+  }
+
+  private triggerSongbirdPhrase(at: number): void {
+    if (!this.ctx || !this.birdsGain) return;
+    const pan = (Math.random() - 0.5) * 1.5;
+    const syllables = 3 + Math.floor(Math.random() * 3);
+    let cursor = at;
+
+    for (let i = 0; i < syllables; i += 1) {
+      const dur = 0.08 + Math.random() * 0.065;
+      const f0 = 2250 + Math.random() * 1450;
+      const sweep = Math.random() < 0.5 ? 1.18 + Math.random() * 0.14 : 0.78 + Math.random() * 0.1;
+      const f1 = Math.max(1900, Math.min(4300, f0 * sweep));
+      this.scheduleBirdTone(cursor, dur, f0, f1, 0.044 + Math.random() * 0.018, pan);
+      cursor += dur + 0.045 + Math.random() * 0.055;
+    }
+  }
+
+  private triggerThrushCall(at: number): void {
+    if (!this.ctx || !this.birdsGain) return;
+    const pan = (Math.random() - 0.5) * 1.3;
+    const root = 2420 + Math.random() * 480;
+
+    this.scheduleBirdTone(at, 0.24, root, root * 1.04, 0.048, pan);
+    this.scheduleBirdTone(at + 0.29, 0.12, root * 1.24, root * 1.32, 0.042, pan);
+    this.scheduleBirdTone(at + 0.43, 0.14, root * 1.18, root * 1.09, 0.04, pan);
+  }
+
+  private scheduleBirdTone(
+    at: number,
+    duration: number,
+    startHz: number,
+    endHz: number,
+    peak: number,
+    pan: number
+  ): void {
+    if (!this.ctx || !this.birdsGain) return;
+
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(startHz, at);
+    osc.frequency.exponentialRampToValueAtTime(endHz, at + duration);
+
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = (startHz + endHz) * 0.5;
+    filter.Q.value = 1.6;
+
+    const gain = this.ctx.createGain();
+    const attack = Math.min(0.025, duration * 0.22);
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.linearRampToValueAtTime(peak, at + attack);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + duration);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    this.connectWithPan(gain, this.birdsGain, pan);
+    osc.start(at);
+    osc.stop(at + duration + 0.02);
   }
 }

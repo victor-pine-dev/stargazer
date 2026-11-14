@@ -1075,13 +1075,13 @@ describe('Phase 7 Calm Mode: Meteor Physics & Soundscape State', () => {
     expect(controller.getActiveCount()).toBe(0);
   });
 
-  it('transitions CalmAudioController state deterministically without AudioContext', async () => {
+  it('transitions CalmAudioController nature soundscape state & daylight sync without AudioContext', async () => {
     const audio = new CalmAudioController();
     expect(audio.getState()).toEqual({
       isPlaying: false,
       isMuted: false,
       volumePercent: 65,
-      preset: 'campfire-music',
+      preset: 'fire-night',
     });
 
     const started = await audio.start();
@@ -1094,8 +1094,24 @@ describe('Phase 7 Calm Mode: Meteor Physics & Soundscape State', () => {
     expect(audio.toggleMuted().isMuted).toBe(true);
     expect(audio.setMuted(false).isMuted).toBe(false);
 
-    expect(audio.setPreset('campfire-only').preset).toBe('campfire-only');
-    expect(audio.setPreset('music-only').preset).toBe('music-only');
+    // Initializes daylight tracking without changing the starting preset, then switches on crossings
+    expect(audio.syncSkyDaylight(false).preset).toBe('fire-night');
+    expect(audio.syncSkyDaylight(true).preset).toBe('fire-birds');
+    expect(audio.syncSkyDaylight(false).preset).toBe('fire-night');
+
+    // Manual override stays put while sky daylight phase remains constant
+    expect(audio.setPreset('fire-birds').preset).toBe('fire-birds');
+    expect(audio.syncSkyDaylight(false).preset).toBe('fire-birds');
+
+    // Night-only <-> Birds-only follows daylight crossing
+    expect(audio.setPreset('night-only').preset).toBe('night-only');
+    expect(audio.syncSkyDaylight(true).preset).toBe('birds-only');
+    expect(audio.syncSkyDaylight(false).preset).toBe('night-only');
+
+    // Fire-only never gets overridden by daylight changes
+    expect(audio.setPreset('fire-only').preset).toBe('fire-only');
+    expect(audio.syncSkyDaylight(true).preset).toBe('fire-only');
+    expect(audio.syncSkyDaylight(false).preset).toBe('fire-only');
 
     expect(audio.stop().isPlaying).toBe(false);
     audio.dispose();
