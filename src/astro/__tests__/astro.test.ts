@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+// @ts-expect-error jsdom does not ship TypeScript declarations in devDependencies
+import { JSDOM } from 'jsdom';
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { parseStarBinary, type ConstellationRecord, type DsoRecord, type NamedStarEntry } from '../../data/catalogLoader';
@@ -1097,5 +1099,67 @@ describe('Phase 7 Calm Mode: Meteor Physics & Soundscape State', () => {
 
     expect(audio.stop().isPlaying).toBe(false);
     audio.dispose();
+  });
+});
+
+describe('HUD Simplification & Mobile-First DOM Structure', () => {
+  it('keeps secondary drawers hidden by default and puts secondary ephemeris in a closed details disclosure', () => {
+    const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8');
+    const dom = new JSDOM(html) as { window: { document: Document } };
+    const doc = dom.window.document;
+
+    for (const id of [
+      'time-panel',
+      'layers-panel',
+      'tour-panel',
+      'iss-panel',
+      'flights-panel',
+      'inspect-card',
+      'ar-hud-banner',
+      'calm-hud-banner',
+    ]) {
+      const el = doc.getElementById(id);
+      expect(el, `#${id} must exist`).not.toBeNull();
+      expect(el?.hasAttribute('hidden'), `#${id} must start hidden`).toBe(true);
+    }
+
+    const inspectCard = doc.getElementById('inspect-card')!;
+    const details = inspectCard.querySelector('details.inspect-details') as HTMLDetailsElement | null;
+    expect(details).not.toBeNull();
+    expect(details?.hasAttribute('open')).toBe(false);
+
+    for (const secondaryId of [
+      'inspect-radec',
+      'inspect-spectral',
+      'inspect-rise',
+      'inspect-transit',
+      'inspect-set',
+      'inspect-airmass',
+    ]) {
+      expect(details?.querySelector(`#${secondaryId}`), `#${secondaryId} should live inside details`).not.toBeNull();
+    }
+
+    // Verify all dock and top-bar controls wired by HudController exist
+    for (const controlId of [
+      'location-trigger',
+      'time-quick-btn',
+      'search-trigger-btn',
+      'hud-hide-btn',
+      'tour-toggle-btn',
+      'time-toggle-btn',
+      'layers-toggle-btn',
+      'iss-toggle-btn',
+      'flights-toggle-btn',
+      'ar-gyro-btn',
+      'calm-mode-btn',
+      'layers-az-readout',
+      'layers-alt-readout',
+      'layers-fov-readout',
+      'layers-zoom-in-btn',
+      'layers-zoom-out-btn',
+      'utc-readout',
+    ]) {
+      expect(doc.getElementById(controlId), `#${controlId} must exist`).not.toBeNull();
+    }
   });
 });

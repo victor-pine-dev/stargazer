@@ -24,129 +24,82 @@
         </div>
       </div>
 
-      <!-- Top HUD Bar -->
+      <!-- Compact Single-Row Top HUD Bar -->
       <header class="hud-top">
-        <div class="hud-panel brand-panel">
-          <div class="brand-title-row">
+        <div class="hud-panel brand-location-bar">
+          <div class="brand-chip">
             <span class="brand-dot" aria-hidden="true"></span>
             <h1 class="brand-name">STARGAZER</h1>
-            <span id="gpu-badge" class="badge badge-gpu">Initializing…</span>
           </div>
-          <div class="brand-metrics">
-            <span id="star-count-label">— stars</span>
-            <span aria-hidden="true">·</span>
-            <span id="fps-label">— FPS</span>
-          </div>
+          <span class="brand-divider" aria-hidden="true"></span>
+          <button
+            id="location-trigger"
+            type="button"
+            class="location-pill"
+            command="show-modal"
+            commandfor="location-dialog"
+            aria-label="Change observer geographic location"
+          >
+            <span class="location-icon" aria-hidden="true">◎</span>
+            <span class="location-meta">
+              <span class="location-name-row">
+                <span id="location-name">Locating…</span>
+                <span id="location-source-badge" class="badge badge-subtle">INIT</span>
+              </span>
+              <span id="location-coords" class="location-coords">—</span>
+            </span>
+            <span class="location-caret" aria-hidden="true">▾</span>
+          </button>
         </div>
 
         <button
-          id="location-trigger"
+          id="time-quick-btn"
           type="button"
-          class="hud-panel location-pill"
-          command="show-modal"
-          commandfor="location-dialog"
-          aria-label="Change observer geographic location"
+          class="hud-panel time-quick-btn"
+          aria-expanded="false"
+          aria-controls="time-panel"
+          aria-label="Open Time Machine and sky clock controls"
         >
-          <span class="location-icon" aria-hidden="true">◎</span>
-          <span class="location-meta">
-            <span class="location-name-row">
-              <span id="location-name">Locating…</span>
-              <span id="location-source-badge" class="badge badge-subtle">INIT</span>
-            </span>
-            <span id="location-coords" class="location-coords">—</span>
-          </span>
-          <span class="location-caret" aria-hidden="true">▾</span>
+          <span class="time-quick-dot" aria-hidden="true"></span>
+          <span id="clock-readout" class="mono">--:--:--</span>
         </button>
 
-        <div class="hud-actions-group" role="group" aria-label="Catalog search, sky tour, satellites, flights, AR mode, and calm campfire mode">
+        <div class="hud-top-right">
+          <div class="hud-panel look-panel">
+            <div class="look-readout">
+              <span><abbr title="Azimuth">AZ</abbr> <strong id="az-readout" class="mono">180.0° S</strong></span>
+              <span><abbr title="Altitude">ALT</abbr> <strong id="alt-readout" class="mono">+32.0°</strong></span>
+              <span><abbr title="Field of View">FOV</abbr> <strong id="fov-readout" class="mono">72°</strong></span>
+            </div>
+            <div class="zoom-controls" role="group" aria-label="Field of view zoom">
+              <button id="zoom-out-btn" type="button" class="icon-btn" title="Zoom out (wide FOV)" aria-label="Zoom out">−</button>
+              <button id="zoom-in-btn" type="button" class="icon-btn" title="Zoom in (narrow FOV)" aria-label="Zoom in">+</button>
+            </div>
+          </div>
+
           <button
             id="search-trigger-btn"
             type="button"
-            class="hud-panel action-pill"
+            class="hud-panel action-pill search-pill"
             command="show-modal"
             commandfor="search-dialog"
             aria-label="Search celestial objects and live aircraft (Command or Control K)"
           >
             <span class="action-pill-icon" aria-hidden="true">⌕</span>
-            <span>Search</span>
+            <span class="search-pill-label">Search</span>
             <kbd class="kbd-hint">⌘K</kbd>
           </button>
-          <button
-            id="tour-toggle-btn"
-            type="button"
-            class="hud-panel action-pill"
-            aria-expanded="false"
-            aria-controls="tour-panel"
-          >
-            <span class="action-pill-icon" aria-hidden="true">✦</span>
-            <span>Tonight's Best</span>
-          </button>
-          <button
-            id="iss-toggle-btn"
-            type="button"
-            class="hud-panel action-pill"
-            aria-expanded="false"
-            aria-controls="iss-panel"
-          >
-            <span class="action-pill-icon" aria-hidden="true">🛰</span>
-            <span>ISS &amp; Passes</span>
-          </button>
-          <button
-            id="flights-toggle-btn"
-            type="button"
-            class="hud-panel action-pill"
-            aria-expanded="false"
-            aria-controls="flights-panel"
-          >
-            <span class="action-pill-icon" aria-hidden="true">✈</span>
-            <span>Flights</span>
-          </button>
-          <button
-            id="ar-gyro-btn"
-            type="button"
-            class="hud-panel action-pill"
-            aria-pressed="false"
-            aria-label="Toggle Mobile AR Gyroscope Sky Tracking"
-          >
-            <span class="action-pill-icon" aria-hidden="true">⌖</span>
-            <span>AR Gyro</span>
-          </button>
-          <button
-            id="calm-mode-btn"
-            type="button"
-            class="hud-panel action-pill action-pill-calm"
-            aria-pressed="false"
-            aria-controls="calm-hud-banner"
-          >
-            <span class="action-pill-icon" aria-hidden="true">🔥</span>
-            <span>Calm Mode</span>
-          </button>
-        </div>
 
-        <div class="hud-panel telemetry-panel">
-          <div class="telemetry-row">
-            <div class="metric-cell">
-              <span class="metric-label">LOCAL / UTC</span>
-              <span id="clock-readout" class="metric-value mono">--:--:--</span>
-            </div>
-            <div class="metric-cell">
-              <span class="metric-label">SIDEREAL (LAST)</span>
-              <span id="last-readout" class="metric-value mono">--h --m --s</span>
-            </div>
-            <div class="metric-cell">
-              <span class="metric-label">SOLAR STATE</span>
-              <span id="sun-readout" class="metric-value">—</span>
-            </div>
-            <div class="metric-cell">
-              <span class="metric-label">LUNAR PHASE</span>
-              <span id="moon-readout" class="metric-value">—</span>
-            </div>
-          </div>
-          <div class="time-mode-group" role="group" aria-label="Sky simulation time mode">
-            <button type="button" class="chip-btn is-active" data-time-mode="live">Live Now</button>
-            <button type="button" class="chip-btn" data-time-mode="sunset">Sunset</button>
-            <button type="button" class="chip-btn" data-time-mode="tonight">Tonight 22:30</button>
-          </div>
+          <button
+            id="hud-hide-btn"
+            type="button"
+            class="hud-panel icon-pill-btn"
+            aria-pressed="false"
+            aria-label="Hide HUD controls for unobstructed sky view"
+            title="Toggle unobstructed sky view"
+          >
+            <span aria-hidden="true">◐</span>
+          </button>
         </div>
       </header>
 
@@ -167,46 +120,200 @@
 
       <!-- Calm / Relax Mode Campfire, Music & Meteor Controls Banner -->
       <section id="calm-hud-banner" class="hud-panel calm-hud-banner" hidden>
-        <div class="calm-hud-status">
-          <span class="badge badge-calm">🔥 CAMPFIRE</span>
-          <span id="calm-status-text" class="calm-status-text">Hearth &amp; ambient sky</span>
-          <span id="calm-meteor-count" class="calm-meteor-count mono">0 meteors</span>
-        </div>
-
-        <div class="calm-hud-audio" role="group" aria-label="Campfire and ambient music audio">
-          <button id="calm-audio-preset-both" type="button" class="chip-btn is-active" data-calm-audio="campfire-music" aria-pressed="true">Fire + Music</button>
-          <button id="calm-audio-preset-fire" type="button" class="chip-btn" data-calm-audio="campfire-only" aria-pressed="false">Fire Only</button>
-          <button id="calm-audio-preset-music" type="button" class="chip-btn" data-calm-audio="music-only" aria-pressed="false">Music Only</button>
-          <button id="calm-audio-mute-btn" type="button" class="chip-btn" aria-pressed="false">Mute</button>
-          <div class="calm-volume-wrap">
-            <label for="calm-volume-slider" class="sr-only">Calm mode soundscape volume</label>
-            <input
-              id="calm-volume-slider"
-              type="range"
-              class="time-scrub-slider calm-volume-slider"
-              min="0"
-              max="100"
-              step="1"
-              value="65"
-              aria-valuetext="65%"
-            />
-            <span id="calm-volume-readout" class="calm-volume-readout mono">65%</span>
+        <div class="calm-banner-top">
+          <div class="calm-hud-status">
+            <span class="badge badge-calm">🔥 CAMPFIRE</span>
+            <span id="calm-meteor-count" class="calm-meteor-count mono">0 meteors</span>
+            <span id="calm-status-text" class="calm-status-text">Hearth &amp; ambient sky</span>
+          </div>
+          <div class="calm-quick-actions" role="group" aria-label="Calm mode quick actions">
+            <button id="calm-wish-btn" type="button" class="chip-btn is-calm-accent">✦ Meteor</button>
+            <button id="calm-face-fire-btn" type="button" class="chip-btn">Fire</button>
+            <button id="calm-zen-btn" type="button" class="chip-btn" aria-pressed="false">Zen</button>
+            <button id="calm-exit-btn" type="button" class="chip-btn is-active">Exit</button>
           </div>
         </div>
 
-        <div class="calm-hud-controls" role="group" aria-label="Meteor shower and view controls">
-          <button type="button" class="chip-btn" data-meteor-rate="occasional" aria-pressed="false">Occasional</button>
-          <button type="button" class="chip-btn is-active" data-meteor-rate="shower" aria-pressed="true">Shower</button>
-          <button type="button" class="chip-btn" data-meteor-rate="fireballs" aria-pressed="false">Fireballs</button>
-          <button id="calm-wish-btn" type="button" class="chip-btn is-calm-accent">✦ Shoot Meteor</button>
-          <button id="calm-face-fire-btn" type="button" class="chip-btn">Face Fire</button>
-          <button id="calm-zen-btn" type="button" class="chip-btn" aria-pressed="false">Zen HUD</button>
-          <button id="calm-exit-btn" type="button" class="chip-btn is-active">Exit Calm</button>
+        <div class="calm-banner-strip">
+          <div class="calm-hud-audio" role="group" aria-label="Campfire and ambient music audio">
+            <button id="calm-audio-preset-both" type="button" class="chip-btn is-active" data-calm-audio="campfire-music" aria-pressed="true">Fire + Music</button>
+            <button id="calm-audio-preset-fire" type="button" class="chip-btn" data-calm-audio="campfire-only" aria-pressed="false">Fire Only</button>
+            <button id="calm-audio-preset-music" type="button" class="chip-btn" data-calm-audio="music-only" aria-pressed="false">Music Only</button>
+            <button id="calm-audio-mute-btn" type="button" class="chip-btn" aria-pressed="false">Mute</button>
+            <div class="calm-volume-wrap">
+              <label for="calm-volume-slider" class="sr-only">Calm mode soundscape volume</label>
+              <input
+                id="calm-volume-slider"
+                type="range"
+                class="time-scrub-slider calm-volume-slider"
+                min="0"
+                max="100"
+                step="1"
+                value="65"
+                aria-valuetext="65%"
+              />
+              <span id="calm-volume-readout" class="calm-volume-readout mono">65%</span>
+            </div>
+          </div>
+
+          <div class="calm-hud-controls" role="group" aria-label="Meteor shower intensity">
+            <button type="button" class="chip-btn" data-meteor-rate="occasional" aria-pressed="false">Occasional</button>
+            <button type="button" class="chip-btn is-active" data-meteor-rate="shower" aria-pressed="true">Shower</button>
+            <button type="button" class="chip-btn" data-meteor-rate="fireballs" aria-pressed="false">Fireballs</button>
+          </div>
         </div>
       </section>
 
+      <!-- On-Demand Time Machine & Ephemeris Drawer -->
+      <aside id="time-panel" class="hud-panel side-drawer time-panel" aria-labelledby="time-panel-title" hidden>
+        <header class="side-panel-header">
+          <div>
+            <h2 id="time-panel-title" class="side-panel-title">Time Machine &amp; Sky Clock</h2>
+            <p id="utc-readout" class="side-panel-subtitle mono">— UTC</p>
+          </div>
+          <button
+            id="time-close-btn"
+            type="button"
+            class="dialog-close"
+            aria-label="Close time machine drawer"
+          >
+            ✕
+          </button>
+        </header>
+
+        <div class="time-mode-group" role="group" aria-label="Sky simulation time mode">
+          <button type="button" class="chip-btn is-active" data-time-mode="live">Live Now</button>
+          <button type="button" class="chip-btn" data-time-mode="sunset">Sunset</button>
+          <button type="button" class="chip-btn" data-time-mode="tonight">Tonight 22:30</button>
+        </div>
+
+        <div class="time-transport-row">
+          <button id="time-play-pause-btn" type="button" class="chip-btn is-active" aria-label="Pause simulation" title="Play or pause sky simulation">
+            Pause
+          </button>
+          <button id="time-now-btn" type="button" class="chip-btn" title="Reset simulation clock to current live time">
+            Now
+          </button>
+          <div class="time-scrub-group">
+            <label for="time-scrub-slider" class="sr-only">Scrub local time of day</label>
+            <input
+              id="time-scrub-slider"
+              type="range"
+              class="time-scrub-slider"
+              min="0"
+              max="1439"
+              step="1"
+              value="720"
+            />
+            <span id="time-scrub-readout" class="time-scrub-readout mono">12:00</span>
+          </div>
+        </div>
+
+        <div class="drawer-section">
+          <span class="field-label">Time Warp Speed</span>
+          <div class="time-warp-grid" role="group" aria-label="Time warp speed multiplier">
+            <button type="button" class="chip-btn warp-btn" data-time-warp="-3600">−3600×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="-300">−300×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="-60">−60×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="-1">−1×</button>
+            <button type="button" class="chip-btn warp-btn is-active" data-time-warp="1">1×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="60">60×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="300">300×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="3600">3600×</button>
+          </div>
+        </div>
+
+        <div class="drawer-section">
+          <label for="time-datetime-input" class="field-label">Jump to Date &amp; Local Time</label>
+          <input id="time-datetime-input" type="datetime-local" class="datetime-input mono" />
+        </div>
+
+        <dl class="inspect-grid time-ephemeris-grid">
+          <div class="inspect-cell inspect-cell-wide">
+            <dt>SIDEREAL (LAST)</dt>
+            <dd id="last-readout" class="mono">--h --m --s</dd>
+          </div>
+          <div class="inspect-cell">
+            <dt>SOLAR STATE</dt>
+            <dd id="sun-readout">—</dd>
+          </div>
+          <div class="inspect-cell">
+            <dt>LUNAR PHASE</dt>
+            <dd id="moon-readout">—</dd>
+          </div>
+        </dl>
+      </aside>
+
+      <!-- On-Demand Layers, Orientation & Renderer Status Drawer -->
+      <aside id="layers-panel" class="hud-panel side-drawer layers-drawer" aria-labelledby="layers-panel-title" hidden>
+        <header class="side-panel-header">
+          <div>
+            <h2 id="layers-panel-title" class="side-panel-title">Sky Layers &amp; View</h2>
+            <p class="side-panel-subtitle">Toggle catalogs, camera orientation, and field of view</p>
+          </div>
+          <button
+            id="layers-close-btn"
+            type="button"
+            class="dialog-close"
+            aria-label="Close layers and view drawer"
+          >
+            ✕
+          </button>
+        </header>
+
+        <div class="drawer-section">
+          <span class="field-label">Camera &amp; Field of View</span>
+          <div class="layers-look-row">
+            <div class="look-readout">
+              <span><abbr title="Azimuth">AZ</abbr> <strong id="layers-az-readout" class="mono">180.0° S</strong></span>
+              <span><abbr title="Altitude">ALT</abbr> <strong id="layers-alt-readout" class="mono">+32.0°</strong></span>
+              <span><abbr title="Field of View">FOV</abbr> <strong id="layers-fov-readout" class="mono">72°</strong></span>
+            </div>
+            <div class="zoom-controls" role="group" aria-label="Adjust field of view zoom">
+              <button id="layers-zoom-out-btn" type="button" class="icon-btn" title="Zoom out (wide FOV)" aria-label="Zoom out">−</button>
+              <button id="layers-zoom-in-btn" type="button" class="icon-btn" title="Zoom in (narrow FOV)" aria-label="Zoom in">+</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="drawer-section">
+          <span class="field-label">Quick Sky Orientation</span>
+          <nav class="compass-nav" aria-label="Quick sky orientation">
+            <button type="button" class="chip-btn" data-look-az="0" data-look-alt="25">N</button>
+            <button type="button" class="chip-btn" data-look-az="90" data-look-alt="25">E</button>
+            <button type="button" class="chip-btn" data-look-az="180" data-look-alt="25">S</button>
+            <button type="button" class="chip-btn" data-look-az="270" data-look-alt="25">W</button>
+            <button type="button" class="chip-btn" data-look-az="180" data-look-alt="89">Zenith</button>
+          </nav>
+        </div>
+
+        <div class="drawer-section">
+          <span class="field-label">Celestial Display Layers</span>
+          <div class="layers-panel-grid" role="group" aria-label="Celestial display layers">
+            <button type="button" class="chip-btn is-active" data-layer="planets" aria-pressed="true">Planets</button>
+            <button type="button" class="chip-btn is-active" data-layer="satellites" aria-pressed="true">Satellites</button>
+            <button type="button" class="chip-btn is-active" data-layer="aircraft" aria-pressed="true">Aircraft</button>
+            <button type="button" class="chip-btn is-active" data-layer="dso" aria-pressed="true">Deep Sky</button>
+            <button type="button" class="chip-btn is-active" data-layer="constellations" aria-pressed="true">Constellations</button>
+            <button type="button" class="chip-btn" data-layer="boundaries" aria-pressed="false">Boundaries</button>
+            <button type="button" class="chip-btn is-active" data-layer="labels" aria-pressed="true">Labels</button>
+            <button type="button" class="chip-btn is-active" data-layer="atmosphere" aria-pressed="true">Atmosphere</button>
+            <button type="button" class="chip-btn is-active" data-layer="horizon" aria-pressed="true">Horizon</button>
+          </div>
+        </div>
+
+        <div class="drawer-status-footer">
+          <span id="gpu-badge" class="badge badge-gpu">Initializing…</span>
+          <div class="brand-metrics mono">
+            <span id="star-count-label">— stars</span>
+            <span aria-hidden="true">·</span>
+            <span id="fps-label">— FPS</span>
+          </div>
+        </div>
+      </aside>
+
       <!-- "Tonight's Best" Guided Sky Tour Drawer -->
-      <aside id="tour-panel" class="hud-panel tour-panel" aria-labelledby="tour-panel-title" hidden>
+      <aside id="tour-panel" class="hud-panel side-drawer tour-panel" aria-labelledby="tour-panel-title" hidden>
         <header class="side-panel-header">
           <div>
             <h2 id="tour-panel-title" class="side-panel-title">Tonight's Best Sky Tour</h2>
@@ -232,7 +339,7 @@
       </aside>
 
       <!-- Live ISS & Satellites Drawer -->
-      <aside id="iss-panel" class="hud-panel iss-panel" aria-labelledby="iss-panel-title" hidden>
+      <aside id="iss-panel" class="hud-panel side-drawer iss-panel" aria-labelledby="iss-panel-title" hidden>
         <header class="side-panel-header">
           <div>
             <h2 id="iss-panel-title" class="side-panel-title">ISS &amp; Live Satellites</h2>
@@ -278,7 +385,7 @@
       </aside>
 
       <!-- Live ADS-B Aircraft Sky Radar Drawer -->
-      <aside id="flights-panel" class="hud-panel flights-panel" aria-labelledby="flights-panel-title" hidden>
+      <aside id="flights-panel" class="hud-panel side-drawer flights-panel" aria-labelledby="flights-panel-title" hidden>
         <header class="side-panel-header">
           <div>
             <h2 id="flights-panel-title" class="side-panel-title">Live Sky Flights (ADS-B)</h2>
@@ -351,14 +458,10 @@
           <p id="inspect-tour-note" class="inspect-tour-note"></p>
         </div>
 
-        <dl class="inspect-grid">
-          <div class="inspect-cell">
+        <dl class="inspect-grid inspect-grid-primary">
+          <div class="inspect-cell inspect-cell-wide">
             <dt>ALT / AZ</dt>
             <dd id="inspect-altaz" class="mono">—</dd>
-          </div>
-          <div class="inspect-cell">
-            <dt>RA / DEC (J2000)</dt>
-            <dd id="inspect-radec" class="mono">—</dd>
           </div>
           <div class="inspect-cell">
             <dt id="inspect-mag-label">VISUAL MAG</dt>
@@ -368,27 +471,37 @@
             <dt>DISTANCE</dt>
             <dd id="inspect-dist" class="mono">—</dd>
           </div>
-          <div class="inspect-cell inspect-cell-wide">
-            <dt>CLASS / TYPE</dt>
-            <dd id="inspect-spectral">—</dd>
-          </div>
-          <div class="inspect-cell">
-            <dt id="inspect-rise-label">RISE</dt>
-            <dd id="inspect-rise" class="mono">—</dd>
-          </div>
-          <div class="inspect-cell">
-            <dt id="inspect-transit-label">TRANSIT</dt>
-            <dd id="inspect-transit" class="mono">—</dd>
-          </div>
-          <div class="inspect-cell">
-            <dt id="inspect-set-label">SET</dt>
-            <dd id="inspect-set" class="mono">—</dd>
-          </div>
-          <div class="inspect-cell">
-            <dt>AIRMASS</dt>
-            <dd id="inspect-airmass" class="mono">—</dd>
-          </div>
         </dl>
+
+        <details class="inspect-details">
+          <summary class="inspect-details-summary">Detailed Ephemeris &amp; Coordinates</summary>
+          <dl class="inspect-grid inspect-grid-secondary">
+            <div class="inspect-cell inspect-cell-wide">
+              <dt>RA / DEC (J2000)</dt>
+              <dd id="inspect-radec" class="mono">—</dd>
+            </div>
+            <div class="inspect-cell inspect-cell-wide">
+              <dt>CLASS / TYPE</dt>
+              <dd id="inspect-spectral">—</dd>
+            </div>
+            <div class="inspect-cell">
+              <dt id="inspect-rise-label">RISE</dt>
+              <dd id="inspect-rise" class="mono">—</dd>
+            </div>
+            <div class="inspect-cell">
+              <dt id="inspect-transit-label">TRANSIT</dt>
+              <dd id="inspect-transit" class="mono">—</dd>
+            </div>
+            <div class="inspect-cell">
+              <dt id="inspect-set-label">SET</dt>
+              <dd id="inspect-set" class="mono">—</dd>
+            </div>
+            <div class="inspect-cell">
+              <dt>AIRMASS</dt>
+              <dd id="inspect-airmass" class="mono">—</dd>
+            </div>
+          </dl>
+        </details>
 
         <p id="inspect-description" class="inspect-description"></p>
 
@@ -398,82 +511,80 @@
         </div>
       </aside>
 
-      <!-- Bottom Control Dock & Time Machine Bar -->
+      <!-- Single-Row Floating Bottom Dock -->
       <footer class="hud-bottom">
-        <section class="hud-panel time-machine-bar" aria-label="Time Machine">
-          <div class="time-transport-group">
-            <button id="time-play-pause-btn" type="button" class="chip-btn is-active" aria-label="Pause simulation" title="Play or pause sky simulation">
-              Pause
-            </button>
-            <button id="time-now-btn" type="button" class="chip-btn" title="Reset simulation clock to current live time">
-              Now
-            </button>
-          </div>
-
-          <div class="time-scrub-group">
-            <label for="time-scrub-slider" class="sr-only">Scrub local time of day</label>
-            <input
-              id="time-scrub-slider"
-              type="range"
-              class="time-scrub-slider"
-              min="0"
-              max="1439"
-              step="1"
-              value="720"
-            />
-            <span id="time-scrub-readout" class="time-scrub-readout mono">12:00</span>
-          </div>
-
-          <div class="time-warp-group" role="group" aria-label="Time warp speed multiplier">
-            <button type="button" class="chip-btn warp-btn" data-time-warp="-3600">−3600×</button>
-            <button type="button" class="chip-btn warp-btn" data-time-warp="-300">−300×</button>
-            <button type="button" class="chip-btn warp-btn" data-time-warp="-60">−60×</button>
-            <button type="button" class="chip-btn warp-btn" data-time-warp="-1">−1×</button>
-            <button type="button" class="chip-btn warp-btn is-active" data-time-warp="1">1×</button>
-            <button type="button" class="chip-btn warp-btn" data-time-warp="60">60×</button>
-            <button type="button" class="chip-btn warp-btn" data-time-warp="300">300×</button>
-            <button type="button" class="chip-btn warp-btn" data-time-warp="3600">3600×</button>
-          </div>
-
-          <div class="time-picker-group">
-            <label for="time-datetime-input" class="sr-only">Simulation date and time</label>
-            <input id="time-datetime-input" type="datetime-local" class="datetime-input mono" />
-          </div>
-        </section>
-
-        <div class="hud-bottom-row">
-          <div class="hud-panel look-panel">
-            <div class="look-readout">
-              <span><abbr title="Azimuth">AZ</abbr> <strong id="az-readout" class="mono">180.0° S</strong></span>
-              <span><abbr title="Altitude">ALT</abbr> <strong id="alt-readout" class="mono">+32.0°</strong></span>
-              <span><abbr title="Field of View">FOV</abbr> <strong id="fov-readout" class="mono">72°</strong></span>
-            </div>
-            <div class="zoom-controls" role="group" aria-label="Field of view zoom">
-              <button id="zoom-in-btn" type="button" class="icon-btn" title="Zoom in (narrow FOV)" aria-label="Zoom in">+</button>
-              <button id="zoom-out-btn" type="button" class="icon-btn" title="Zoom out (wide FOV)" aria-label="Zoom out">−</button>
-            </div>
-          </div>
-
-          <nav class="hud-panel compass-nav" aria-label="Quick sky orientation">
-            <button type="button" class="chip-btn" data-look-az="0" data-look-alt="25">N</button>
-            <button type="button" class="chip-btn" data-look-az="90" data-look-alt="25">E</button>
-            <button type="button" class="chip-btn" data-look-az="180" data-look-alt="25">S</button>
-            <button type="button" class="chip-btn" data-look-az="270" data-look-alt="25">W</button>
-            <button type="button" class="chip-btn" data-look-az="180" data-look-alt="89">Zenith</button>
-          </nav>
-
-          <div class="hud-panel layers-panel" role="group" aria-label="Celestial display layers">
-            <button type="button" class="chip-btn is-active" data-layer="planets" aria-pressed="true">Planets</button>
-            <button type="button" class="chip-btn is-active" data-layer="satellites" aria-pressed="true">Satellites</button>
-            <button type="button" class="chip-btn is-active" data-layer="aircraft" aria-pressed="true">Aircraft</button>
-            <button type="button" class="chip-btn is-active" data-layer="dso" aria-pressed="true">Deep Sky</button>
-            <button type="button" class="chip-btn is-active" data-layer="constellations" aria-pressed="true">Constellations</button>
-            <button type="button" class="chip-btn" data-layer="boundaries" aria-pressed="false">Boundaries</button>
-            <button type="button" class="chip-btn is-active" data-layer="labels" aria-pressed="true">Labels</button>
-            <button type="button" class="chip-btn is-active" data-layer="atmosphere" aria-pressed="true">Atmosphere</button>
-            <button type="button" class="chip-btn is-active" data-layer="horizon" aria-pressed="true">Horizon</button>
-          </div>
-        </div>
+        <nav class="hud-panel hud-dock" aria-label="Observatory controls">
+          <button
+            id="tour-toggle-btn"
+            type="button"
+            class="dock-btn"
+            aria-expanded="false"
+            aria-controls="tour-panel"
+          >
+            <span class="dock-btn-icon" aria-hidden="true">✦</span>
+            <span class="dock-btn-label">Tonight</span>
+          </button>
+          <button
+            id="time-toggle-btn"
+            type="button"
+            class="dock-btn"
+            aria-expanded="false"
+            aria-controls="time-panel"
+          >
+            <span class="dock-btn-icon" aria-hidden="true">⏱</span>
+            <span class="dock-btn-label">Time</span>
+          </button>
+          <button
+            id="layers-toggle-btn"
+            type="button"
+            class="dock-btn"
+            aria-expanded="false"
+            aria-controls="layers-panel"
+          >
+            <span class="dock-btn-icon" aria-hidden="true">◈</span>
+            <span class="dock-btn-label">Layers</span>
+          </button>
+          <button
+            id="iss-toggle-btn"
+            type="button"
+            class="dock-btn"
+            aria-expanded="false"
+            aria-controls="iss-panel"
+          >
+            <span class="dock-btn-icon" aria-hidden="true">🛰</span>
+            <span class="dock-btn-label">ISS</span>
+          </button>
+          <button
+            id="flights-toggle-btn"
+            type="button"
+            class="dock-btn"
+            aria-expanded="false"
+            aria-controls="flights-panel"
+          >
+            <span class="dock-btn-icon" aria-hidden="true">✈</span>
+            <span class="dock-btn-label">Flights</span>
+          </button>
+          <button
+            id="ar-gyro-btn"
+            type="button"
+            class="dock-btn"
+            aria-pressed="false"
+            aria-label="Toggle Mobile AR Gyroscope Sky Tracking"
+          >
+            <span class="dock-btn-icon" aria-hidden="true">⌖</span>
+            <span class="dock-btn-label">AR</span>
+          </button>
+          <button
+            id="calm-mode-btn"
+            type="button"
+            class="dock-btn dock-btn-calm"
+            aria-pressed="false"
+            aria-controls="calm-hud-banner"
+          >
+            <span class="dock-btn-icon" aria-hidden="true">🔥</span>
+            <span class="dock-btn-label">Calm</span>
+          </button>
+        </nav>
       </footer>
     </div>
 

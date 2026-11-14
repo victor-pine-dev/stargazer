@@ -98,9 +98,16 @@ function syncRangeSliderCssVars(slider: HTMLInputElement): void {
   slider.style.setProperty('--control-value', slider.value);
 }
 
+type DrawerKey = 'tour' | 'time' | 'layers' | 'iss' | 'flights';
+
 export class HudController {
   private readonly engine: SkyEngine;
   private currentLocation: ObserverLocation;
+
+  private readonly skyCanvas: HTMLCanvasElement;
+  private readonly hudHideBtn: HTMLButtonElement;
+  private isHudMinimized = false;
+  private activeDrawer: DrawerKey | null = null;
 
   private readonly gpuBadge: HTMLElement;
   private readonly starCountLabel: HTMLElement;
@@ -109,14 +116,22 @@ export class HudController {
   private readonly locationSourceBadge: HTMLElement;
   private readonly locationCoordsEl: HTMLElement;
   private readonly clockReadout: HTMLElement;
+  private readonly utcReadout: HTMLElement;
   private readonly lastReadout: HTMLElement;
   private readonly sunReadout: HTMLElement;
   private readonly moonReadout: HTMLElement;
   private readonly azReadout: HTMLElement;
   private readonly altReadout: HTMLElement;
   private readonly fovReadout: HTMLElement;
+  private readonly layersAzReadout: HTMLElement;
+  private readonly layersAltReadout: HTMLElement;
+  private readonly layersFovReadout: HTMLElement;
   private readonly labelsLayer: HTMLElement;
 
+  private readonly timeQuickBtn: HTMLButtonElement;
+  private readonly timeToggleBtn: HTMLButtonElement;
+  private readonly timePanel: HTMLElement;
+  private readonly timeCloseBtn: HTMLButtonElement;
   private readonly timePlayPauseBtn: HTMLButtonElement;
   private readonly timeNowBtn: HTMLButtonElement;
   private readonly timeScrubSlider: HTMLInputElement;
@@ -125,6 +140,12 @@ export class HudController {
   private readonly timeWarpButtons: NodeListOf<HTMLButtonElement>;
   private readonly timeModeButtons: NodeListOf<HTMLButtonElement>;
   private isScrubbingTime = false;
+
+  private readonly layersToggleBtn: HTMLButtonElement;
+  private readonly layersPanel: HTMLElement;
+  private readonly layersCloseBtn: HTMLButtonElement;
+  private readonly layersZoomInBtn: HTMLButtonElement;
+  private readonly layersZoomOutBtn: HTMLButtonElement;
 
   private readonly locationDialog: HTMLDialogElement;
   private readonly locationSearchInput: HTMLInputElement;
@@ -261,6 +282,9 @@ export class HudController {
     this.engine = engine;
     this.currentLocation = initialLocation;
 
+    this.skyCanvas = document.getElementById('sky-canvas') as HTMLCanvasElement;
+    this.hudHideBtn = document.getElementById('hud-hide-btn') as HTMLButtonElement;
+
     this.gpuBadge = document.getElementById('gpu-badge')!;
     this.starCountLabel = document.getElementById('star-count-label')!;
     this.fpsLabel = document.getElementById('fps-label')!;
@@ -268,14 +292,22 @@ export class HudController {
     this.locationSourceBadge = document.getElementById('location-source-badge')!;
     this.locationCoordsEl = document.getElementById('location-coords')!;
     this.clockReadout = document.getElementById('clock-readout')!;
+    this.utcReadout = document.getElementById('utc-readout')!;
     this.lastReadout = document.getElementById('last-readout')!;
     this.sunReadout = document.getElementById('sun-readout')!;
     this.moonReadout = document.getElementById('moon-readout')!;
     this.azReadout = document.getElementById('az-readout')!;
     this.altReadout = document.getElementById('alt-readout')!;
     this.fovReadout = document.getElementById('fov-readout')!;
+    this.layersAzReadout = document.getElementById('layers-az-readout')!;
+    this.layersAltReadout = document.getElementById('layers-alt-readout')!;
+    this.layersFovReadout = document.getElementById('layers-fov-readout')!;
     this.labelsLayer = document.getElementById('sky-labels-layer')!;
 
+    this.timeQuickBtn = document.getElementById('time-quick-btn') as HTMLButtonElement;
+    this.timeToggleBtn = document.getElementById('time-toggle-btn') as HTMLButtonElement;
+    this.timePanel = document.getElementById('time-panel')!;
+    this.timeCloseBtn = document.getElementById('time-close-btn') as HTMLButtonElement;
     this.timePlayPauseBtn = document.getElementById('time-play-pause-btn') as HTMLButtonElement;
     this.timeNowBtn = document.getElementById('time-now-btn') as HTMLButtonElement;
     this.timeScrubSlider = document.getElementById('time-scrub-slider') as HTMLInputElement;
@@ -283,6 +315,12 @@ export class HudController {
     this.timeDatetimeInput = document.getElementById('time-datetime-input') as HTMLInputElement;
     this.timeWarpButtons = document.querySelectorAll<HTMLButtonElement>('[data-time-warp]');
     this.timeModeButtons = document.querySelectorAll<HTMLButtonElement>('[data-time-mode]');
+
+    this.layersToggleBtn = document.getElementById('layers-toggle-btn') as HTMLButtonElement;
+    this.layersPanel = document.getElementById('layers-panel')!;
+    this.layersCloseBtn = document.getElementById('layers-close-btn') as HTMLButtonElement;
+    this.layersZoomInBtn = document.getElementById('layers-zoom-in-btn') as HTMLButtonElement;
+    this.layersZoomOutBtn = document.getElementById('layers-zoom-out-btn') as HTMLButtonElement;
 
     this.locationDialog = document.getElementById('location-dialog') as HTMLDialogElement;
     this.locationSearchInput = document.getElementById('location-search-input') as HTMLInputElement;
@@ -552,9 +590,58 @@ export class HudController {
       }
     });
 
-    // Zoom buttons
+    // Zoom buttons (top bar & layers drawer)
     document.getElementById('zoom-in-btn')?.addEventListener('click', () => this.engine.zoomBy(-12));
     document.getElementById('zoom-out-btn')?.addEventListener('click', () => this.engine.zoomBy(12));
+    this.layersZoomInBtn.addEventListener('click', () => this.engine.zoomBy(-12));
+    this.layersZoomOutBtn.addEventListener('click', () => this.engine.zoomBy(12));
+
+    // Unobstructed sky toggle (Hide/Show HUD)
+    this.hudHideBtn.addEventListener('click', () => {
+      this.isHudMinimized = !this.isHudMinimized;
+      document.body.classList.toggle('is-hud-minimized', this.isHudMinimized);
+      this.hudHideBtn.classList.toggle('is-active', this.isHudMinimized);
+      this.hudHideBtn.setAttribute('aria-pressed', String(this.isHudMinimized));
+      this.hudHideBtn.setAttribute(
+        'aria-label',
+        this.isHudMinimized ? 'Show HUD controls' : 'Hide HUD controls for unobstructed sky view',
+      );
+      if (this.isHudMinimized) {
+        this.setActiveDrawer(null);
+      }
+    });
+
+    // Time Machine & Layers drawers
+    const toggleTimeDrawer = () => {
+      this.setActiveDrawer(this.activeDrawer === 'time' ? null : 'time');
+    };
+    this.timeQuickBtn.addEventListener('click', toggleTimeDrawer);
+    this.timeToggleBtn.addEventListener('click', toggleTimeDrawer);
+    this.timeCloseBtn.addEventListener('click', () => this.setActiveDrawer(null));
+
+    this.layersToggleBtn.addEventListener('click', () => {
+      this.setActiveDrawer(this.activeDrawer === 'layers' ? null : 'layers');
+    });
+    this.layersCloseBtn.addEventListener('click', () => this.setActiveDrawer(null));
+
+    // Light-dismiss open drawers on canvas tap (non-drag)
+    let canvasTapStart: { pointerId: number; x: number; y: number } | null = null;
+    this.skyCanvas.addEventListener('pointerdown', (e) => {
+      if (e.isPrimary) {
+        canvasTapStart = { pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+      }
+    });
+    this.skyCanvas.addEventListener('pointerup', (e) => {
+      if (!canvasTapStart || canvasTapStart.pointerId !== e.pointerId) return;
+      const dist = Math.hypot(e.clientX - canvasTapStart.x, e.clientY - canvasTapStart.y);
+      canvasTapStart = null;
+      if (dist < 8 && this.activeDrawer !== null) {
+        this.setActiveDrawer(null);
+      }
+    });
+    this.skyCanvas.addEventListener('pointercancel', () => {
+      canvasTapStart = null;
+    });
 
     // Search presets
     this.locationSearchInput.addEventListener('input', () => {
@@ -614,7 +701,7 @@ export class HudController {
       this.renderSearchResults();
     });
 
-    // Global Cmd/Ctrl+K shortcut to toggle Search Catalog palette
+    // Global Cmd/Ctrl+K shortcut to toggle Search Catalog palette, Escape to dismiss open drawer
     window.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
@@ -629,6 +716,17 @@ export class HudController {
           this.searchDialog.showModal();
           this.celestialSearchInput.focus();
           this.celestialSearchInput.select();
+        }
+        return;
+      }
+
+      if (e.key === 'Escape' && !this.locationDialog.open && !this.searchDialog.open) {
+        if (this.activeDrawer !== null) {
+          this.setActiveDrawer(null);
+        } else if (!this.inspectCard.hidden) {
+          this.activeTourIndex = null;
+          this.renderTourList();
+          this.engine.selectObject(null);
         }
       }
     });
@@ -691,12 +789,11 @@ export class HudController {
 
     // Tonight's Best Tour panel & stepping
     this.tourToggleBtn.addEventListener('click', () => {
-      const opening = this.tourPanel.hidden;
-      this.setTourPanelOpen(opening);
+      this.setActiveDrawer(this.activeDrawer === 'tour' ? null : 'tour');
     });
 
     this.tourCloseBtn.addEventListener('click', () => {
-      this.setTourPanelOpen(false);
+      this.setActiveDrawer(null);
     });
 
     const stepTour = (delta: number) => {
@@ -716,13 +813,15 @@ export class HudController {
 
     // ISS & Satellites drawer
     this.issToggleBtn.addEventListener('click', () => {
-      const opening = this.issPanel.hidden;
-      this.setIssPanelOpen(opening);
+      this.setActiveDrawer(this.activeDrawer === 'iss' ? null : 'iss');
     });
     this.issCloseBtn.addEventListener('click', () => {
-      this.setIssPanelOpen(false);
+      this.setActiveDrawer(null);
     });
     this.issTrackBtn.addEventListener('click', () => {
+      if (window.innerWidth <= 768) {
+        this.setActiveDrawer(null);
+      }
       this.engine.trackIss();
       this.syncLayerToggleButtons();
     });
@@ -745,13 +844,15 @@ export class HudController {
 
     // Live ADS-B Flights drawer
     this.flightsToggleBtn.addEventListener('click', () => {
-      const opening = this.flightsPanel.hidden;
-      this.setFlightsPanelOpen(opening);
+      this.setActiveDrawer(this.activeDrawer === 'flights' ? null : 'flights');
     });
     this.flightsCloseBtn.addEventListener('click', () => {
-      this.setFlightsPanelOpen(false);
+      this.setActiveDrawer(null);
     });
     this.flightsTrackBtn.addEventListener('click', () => {
+      if (window.innerWidth <= 768) {
+        this.setActiveDrawer(null);
+      }
       this.engine.trackClosestAircraft();
       this.syncLayerToggleButtons();
     });
@@ -771,6 +872,9 @@ export class HudController {
     // Mobile AR Gyroscope mode
     this.arGyroBtn.addEventListener('click', async () => {
       const state = await this.engine.toggleArGyro();
+      if (state.status !== 'off' && window.innerWidth <= 768) {
+        this.setActiveDrawer(null);
+      }
       this.updateArBanner(state);
     });
     this.arTrimLeftBtn.addEventListener('click', () => this.engine.adjustArCompassOffset(-5));
@@ -786,9 +890,7 @@ export class HudController {
     // Calm / Relax Mode (Campfire, Music & Meteors)
     const setCalmModeActive = (enable: boolean) => {
       if (enable) {
-        if (!this.tourPanel.hidden) this.setTourPanelOpen(false);
-        if (!this.issPanel.hidden) this.setIssPanelOpen(false);
-        if (!this.flightsPanel.hidden) this.setFlightsPanelOpen(false);
+        this.setActiveDrawer(null);
         const snap = this.engine.toggleCalmMode(true);
         this.syncCalmModeUi(snap);
         this.syncLayerToggleButtons();
@@ -927,6 +1029,9 @@ export class HudController {
     this.activeTourIndex = null;
     this.renderTourList();
     this.searchDialog.close('select');
+    if (window.innerWidth <= 768 && this.activeDrawer !== null) {
+      this.setActiveDrawer(null);
+    }
     if (item.kind === 'satellite') {
       this.engine.setLayers({ satellites: true });
       this.syncLayerToggleButtons();
@@ -937,51 +1042,70 @@ export class HudController {
     this.engine.selectObject(item.ref, { flyTo: true, track: true });
   }
 
-  private setTourPanelOpen(open: boolean): void {
-    if (open && !this.issPanel.hidden) {
-      this.setIssPanelOpen(false);
-    }
-    if (open && !this.flightsPanel.hidden) {
-      this.setFlightsPanelOpen(false);
-    }
-    this.tourPanel.hidden = !open;
-    this.tourToggleBtn.classList.toggle('is-active', open);
-    this.tourToggleBtn.setAttribute('aria-expanded', String(open));
-    if (open) {
-      this.refreshTourStops();
-    }
-  }
+  private setActiveDrawer(drawer: DrawerKey | null): void {
+    this.activeDrawer = drawer;
 
-  private setIssPanelOpen(open: boolean): void {
-    if (open && !this.tourPanel.hidden) {
-      this.setTourPanelOpen(false);
+    // On mobile viewports, keep only one bottom sheet visible at a time
+    if (drawer !== null && window.innerWidth <= 768 && !this.inspectCard.hidden) {
+      this.activeTourIndex = null;
+      this.renderTourList();
+      this.engine.selectObject(null);
     }
-    if (open && !this.flightsPanel.hidden) {
-      this.setFlightsPanelOpen(false);
-    }
-    this.issPanel.hidden = !open;
-    this.issToggleBtn.classList.toggle('is-active', open);
-    this.issToggleBtn.setAttribute('aria-expanded', String(open));
-    if (open) {
-      this.lastPassesRenderKey = '';
-      this.lastSatListRenderMs = 0;
-      this.updateSatelliteDrawer(this.engine.getSatelliteSnapshot(), null);
-    }
-  }
 
-  private setFlightsPanelOpen(open: boolean): void {
-    if (open && !this.tourPanel.hidden) {
-      this.setTourPanelOpen(false);
-    }
-    if (open && !this.issPanel.hidden) {
-      this.setIssPanelOpen(false);
-    }
-    this.flightsPanel.hidden = !open;
-    this.flightsToggleBtn.classList.toggle('is-active', open);
-    this.flightsToggleBtn.setAttribute('aria-expanded', String(open));
-    if (open) {
-      this.lastFlightsListRenderMs = 0;
-      this.updateFlightsDrawer(this.engine.getAircraftSnapshot(), null, true);
+    const drawers: Array<{
+      key: DrawerKey;
+      panel: HTMLElement;
+      triggers: HTMLButtonElement[];
+      onOpen?: () => void;
+    }> = [
+      {
+        key: 'tour',
+        panel: this.tourPanel,
+        triggers: [this.tourToggleBtn],
+        onOpen: () => this.refreshTourStops(),
+      },
+      {
+        key: 'time',
+        panel: this.timePanel,
+        triggers: [this.timeToggleBtn, this.timeQuickBtn],
+      },
+      {
+        key: 'layers',
+        panel: this.layersPanel,
+        triggers: [this.layersToggleBtn],
+        onOpen: () => this.syncLayerToggleButtons(),
+      },
+      {
+        key: 'iss',
+        panel: this.issPanel,
+        triggers: [this.issToggleBtn],
+        onOpen: () => {
+          this.lastPassesRenderKey = '';
+          this.lastSatListRenderMs = 0;
+          this.updateSatelliteDrawer(this.engine.getSatelliteSnapshot(), null);
+        },
+      },
+      {
+        key: 'flights',
+        panel: this.flightsPanel,
+        triggers: [this.flightsToggleBtn],
+        onOpen: () => {
+          this.lastFlightsListRenderMs = 0;
+          this.updateFlightsDrawer(this.engine.getAircraftSnapshot(), null, true);
+        },
+      },
+    ];
+
+    for (const entry of drawers) {
+      const open = drawer === entry.key;
+      entry.panel.hidden = !open;
+      for (const trigger of entry.triggers) {
+        trigger.classList.toggle('is-active', open);
+        trigger.setAttribute('aria-expanded', String(open));
+      }
+      if (open) {
+        entry.onOpen?.();
+      }
     }
   }
 
@@ -1089,6 +1213,9 @@ export class HudController {
 
       btn.append(main, meta);
       btn.addEventListener('click', () => {
+        if (window.innerWidth <= 768) {
+          this.setActiveDrawer(null);
+        }
         this.engine.jumpToSatellitePass(pass);
         this.syncLayerToggleButtons();
       });
@@ -1132,6 +1259,9 @@ export class HudController {
 
         btn.append(main, meta);
         btn.addEventListener('click', () => {
+          if (window.innerWidth <= 768) {
+            this.setActiveDrawer(null);
+          }
           this.engine.setLayers({ satellites: true });
           this.syncLayerToggleButtons();
           this.engine.selectObject(
@@ -1257,6 +1387,9 @@ export class HudController {
 
     this.activeTourIndex = index;
     this.renderTourList();
+    if (window.innerWidth <= 768 && this.activeDrawer !== null) {
+      this.setActiveDrawer(null);
+    }
     this.engine.selectObject(stop.ref, {
       flyTo: true,
       track: true,
@@ -1273,6 +1406,11 @@ export class HudController {
       this.inspectCard.hidden = true;
       this.skyReticle.hidden = true;
       return;
+    }
+
+    const wasHidden = this.inspectCard.hidden;
+    if (wasHidden && window.innerWidth <= 768 && this.activeDrawer !== null) {
+      this.setActiveDrawer(null);
     }
 
     // Clear active tour highlight if user clicked a different object manually
@@ -1357,9 +1495,8 @@ export class HudController {
           ? ''
           : snapshot.timeMode.toUpperCase();
 
-    this.clockReadout.textContent = speedTag
-      ? `${localStr} · ${utcStr} UTC (${speedTag})`
-      : `${localStr} (${utcStr} UTC)`;
+    this.clockReadout.textContent = speedTag ? `${localStr} · ${speedTag}` : localStr;
+    this.utcReadout.textContent = `${utcStr} UTC · ${speedTag || 'LIVE'}`;
 
     this.lastReadout.textContent = formatHMS(snapshot.lastRad, true);
     this.sunReadout.textContent = `${snapshot.sun.twilightPhase} (${snapshot.sun.altDeg >= 0 ? '+' : ''}${snapshot.sun.altDeg.toFixed(1)}°)`;
@@ -1396,9 +1533,15 @@ export class HudController {
     }
 
     const cardinal = azimuthToCardinal(snapshot.azDeg);
-    this.azReadout.textContent = `${snapshot.azDeg.toFixed(1)}° ${cardinal}`;
-    this.altReadout.textContent = `${snapshot.altDeg >= 0 ? '+' : ''}${snapshot.altDeg.toFixed(1)}°`;
-    this.fovReadout.textContent = `${Math.round(snapshot.fovDeg)}°`;
+    const azText = `${snapshot.azDeg.toFixed(1)}° ${cardinal}`;
+    const altText = `${snapshot.altDeg >= 0 ? '+' : ''}${snapshot.altDeg.toFixed(1)}°`;
+    const fovText = `${Math.round(snapshot.fovDeg)}°`;
+    this.azReadout.textContent = azText;
+    this.altReadout.textContent = altText;
+    this.fovReadout.textContent = fovText;
+    this.layersAzReadout.textContent = azText;
+    this.layersAltReadout.textContent = altText;
+    this.layersFovReadout.textContent = fovText;
 
     this.updateSelectedObject(
       snapshot.selectedObject,
@@ -1549,6 +1692,9 @@ export class HudController {
         const hex = ac.hex;
         const id = ac.id;
         btn.addEventListener('click', () => {
+          if (window.innerWidth <= 768) {
+            this.setActiveDrawer(null);
+          }
           this.engine.setLayers({ aircraft: true });
           this.syncLayerToggleButtons();
           this.engine.selectObject(
