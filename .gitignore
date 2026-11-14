@@ -5,5 +5,7 @@ coverage/
 *.log
 .env
 .env.*
+.env.local
 .azure/
+.swa/
 *.azure.json

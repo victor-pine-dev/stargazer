@@ -643,3 +643,75 @@ describe('Phase 4 Live Satellites, Pass Prediction & AR Gyro Fusion', () => {
     expect(landscapeEast.altDeg).toBeCloseTo(0, 2);
   });
 });
+
+describe('Phase 5 Azure Static Web Apps Config, CI/CD & Secret Hygiene', () => {
+  const repoRoot = resolve(process.cwd());
+
+  it('configures immutable cache headers and binary MIME types in public/staticwebapp.config.json', () => {
+    const configPath = resolve(repoRoot, 'public/staticwebapp.config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as {
+      routes: Array<{ route: string; headers?: Record<string, string> }>;
+      navigationFallback?: { rewrite: string; exclude?: string[] };
+      mimeTypes?: Record<string, string>;
+      globalHeaders?: Record<string, string>;
+    };
+
+    const starsRoute = config.routes.find((r) => r.route === '/data/stars.bin');
+    expect(starsRoute?.headers?.['Cache-Control']).toBe('public, max-age=31536000, immutable');
+    expect(starsRoute?.headers?.['Content-Type']).toBe('application/octet-stream');
+
+    const dataRoute = config.routes.find((r) => r.route === '/data/*');
+    expect(dataRoute?.headers?.['Cache-Control']).toBe('public, max-age=31536000, immutable');
+
+    const assetsRoute = config.routes.find((r) => r.route === '/assets/*');
+    expect(assetsRoute?.headers?.['Cache-Control']).toBe('public, max-age=31536000, immutable');
+
+    expect(config.mimeTypes?.['.bin']).toBe('application/octet-stream');
+    expect(config.navigationFallback?.rewrite).toBe('/index.html');
+    expect(config.navigationFallback?.exclude).toContain('/data/*');
+    expect(config.navigationFallback?.exclude).toContain('*.bin');
+  });
+
+  it('configures GitHub Actions CI/CD workflow using repository secrets only', () => {
+    const workflowPath = resolve(repoRoot, '.github/workflows/deploy.yml');
+    const workflow = readFileSync(workflowPath, 'utf8');
+
+    expect(workflow).toContain('npm test');
+    expect(workflow).toContain('npm run build');
+    expect(workflow).toContain('Azure/static-web-apps-deploy@v1');
+    expect(workflow).toContain('${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}');
+    expect(workflow).toContain("app_location: 'dist'");
+    expect(workflow).toContain('skip_app_build: true');
+  });
+
+  it('ignores local environment and cloud configuration files in .gitignore', () => {
+    const gitignore = readFileSync(resolve(repoRoot, '.gitignore'), 'utf8')
+      .split(/\r?\n/)
+      .map((line) => line.trim());
+
+    expect(gitignore).toContain('.env');
+    expect(gitignore).toContain('.env.*');
+    expect(gitignore).toContain('.env.local');
+    expect(gitignore).toContain('.azure/');
+  });
+
+  it('keeps private Azure infrastructure identifiers out of tracked config, workflow, and README', () => {
+    const uuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+    const resourceGroupPattern = /\brg-[a-z0-9-]+/i;
+    const sensitiveFiles = [
+      'README.md',
+      'public/staticwebapp.config.json',
+      '.github/workflows/deploy.yml',
+      'package.json',
+    ];
+
+    for (const relPath of sensitiveFiles) {
+      const content = readFileSync(resolve(repoRoot, relPath), 'utf8');
+      expect(content, `${relPath} must not contain UUIDs`).not.toMatch(uuidPattern);
+      expect(content, `${relPath} must not contain resource group names`).not.toMatch(resourceGroupPattern);
+      expect(content, `${relPath} must not contain raw Azure subscription/account strings`).not.toMatch(
+        /onmicrosoft\.com|AZURE_SUBSCRIPTION_ID=|AZURE_RESOURCE_GROUP=|AZURE_STATIC_WEB_APPS_API_TOKEN=/i,
+      );
+    }
+  });
+});
