@@ -1073,6 +1073,136 @@ dialog::backdrop {
   gap: 6px;
 }
 
+/* Calm / Relax Mode Campfire, Music & Meteor HUD */
+.action-pill-calm .action-pill-icon {
+  color: var(--amber);
+}
+
+.action-pill-calm.is-active,
+.action-pill-calm[aria-pressed='true'] {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: rgba(245, 158, 11, 0.62);
+  color: #fef3c7;
+}
+
+.badge-calm {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fde68a;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+}
+
+.calm-hud-banner {
+  position: fixed;
+  top: max(82px, calc(76px + env(safe-area-inset-top)));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 26;
+  width: min(880px, calc(100vw - 28px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+  padding: 9px 13px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+}
+
+.calm-hud-banner:not([hidden]) {
+  display: flex;
+}
+
+body.is-calm-mode .calm-hud-banner {
+  border-color: rgba(245, 158, 11, 0.35);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.48), 0 0 24px rgba(245, 158, 11, 0.1);
+}
+
+.calm-hud-status,
+.calm-hud-audio,
+.calm-hud-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.calm-status-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.calm-meteor-count {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #fde68a;
+}
+
+.calm-volume-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-inline: 4px;
+}
+
+input[type='range'].calm-volume-slider {
+  --slider-fill-color: var(--amber);
+  --slider-thumb-color: #fef3c7;
+  inline-size: 86px;
+  block-size: 1.75rem;
+}
+
+input[type='range'].calm-volume-slider::-webkit-slider-thumb {
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.55);
+}
+
+.calm-volume-readout {
+  min-width: 32px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.calm-hud-banner .chip-btn.is-active,
+.calm-hud-banner .chip-btn[aria-pressed='true'] {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: rgba(245, 158, 11, 0.56);
+  color: #fef3c7;
+}
+
+.chip-btn.is-calm-accent {
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(245, 158, 11, 0.44);
+  color: #fde68a;
+}
+
+.chip-btn.is-calm-accent:hover {
+  background: rgba(245, 158, 11, 0.28);
+  border-color: rgba(245, 158, 11, 0.68);
+  color: #fffbeb;
+}
+
+.telemetry-panel,
+.location-pill,
+.hud-bottom,
+.inspect-card,
+.tour-panel,
+.iss-panel,
+.flights-panel {
+  transition: opacity 0.35s ease, visibility 0.35s ease;
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
+}
+
+body.is-calm-zen .telemetry-panel,
+body.is-calm-zen .location-pill,
+body.is-calm-zen .hud-bottom,
+body.is-calm-zen .inspect-card,
+body.is-calm-zen .tour-panel,
+body.is-calm-zen .iss-panel,
+body.is-calm-zen .flights-panel {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* ISS & Live Satellites Drawer */
 .iss-live-card {
   display: flex;
@@ -1395,7 +1525,8 @@ dialog::backdrop {
     justify-content: space-between;
   }
 
-  .ar-hud-banner {
+  .ar-hud-banner,
+  .calm-hud-banner {
     top: max(154px, calc(146px + env(safe-area-inset-top)));
   }
 
@@ -1428,7 +1559,8 @@ dialog::backdrop {
     bottom: max(8px, env(safe-area-inset-bottom));
   }
 
-  .ar-hud-banner {
+  .ar-hud-banner,
+  .calm-hud-banner {
     top: max(172px, calc(164px + env(safe-area-inset-top)));
     width: calc(100vw - 16px - env(safe-area-inset-left) - env(safe-area-inset-right));
     padding: 8px 10px;

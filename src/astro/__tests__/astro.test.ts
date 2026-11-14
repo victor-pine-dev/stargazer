@@ -46,6 +46,13 @@ import {
   parseReadsbResponse,
   propagateAircraftState,
 } from '../aircraft';
+import {
+  evaluateMeteorState,
+  MeteorShowerController,
+  slerpUnitVectors,
+  spawnMeteorTrajectory,
+} from '../meteors';
+import { CalmAudioController } from '../../services/calmAudioService';
 
 describe('Astronomical Coordinate & Sidereal Math', () => {
   it('converts RA/Dec to orthonormal J2000 unit vectors', () => {
@@ -960,5 +967,135 @@ describe('Phase 6 Live ADS-B Aircraft Sky Tracker & Dead-Reckoning', () => {
     expect(telemetry?.vmagFormatted).toContain('FL');
     expect(telemetry?.distanceLabel).toContain('km slant');
     expect(telemetry?.rts.transit).toContain('HDG');
+  });
+});
+
+describe('Phase 7 Calm Mode: Meteor Physics & Soundscape State', () => {
+  it('spawns above-horizon unit-vector meteor trajectories and bright fireballs', () => {
+    let seed = 0.23;
+    const deterministicRandom = () => {
+      seed = (seed * 9301 + 49297) % 233280;
+      return seed / 233280;
+    };
+
+    for (let i = 0; i < 8; i++) {
+      const meteor = spawnMeteorTrajectory({
+        nowMs: 10_000,
+        cameraAzDeg: 180,
+        cameraAltDeg: 20,
+        rateMode: 'shower',
+        forceFireball: i === 0,
+        random: deterministicRandom,
+        idSuffix: i,
+      });
+
+      const startLen = Math.hypot(...meteor.startDir);
+      const endLen = Math.hypot(...meteor.endDir);
+      expect(startLen).toBeCloseTo(1, 5);
+      expect(endLen).toBeCloseTo(1, 5);
+
+      const startHor = worldVectorToAltAz(...meteor.startDir);
+      const endHor = worldVectorToAltAz(...meteor.endDir);
+      expect(startHor.altDeg).toBeGreaterThan(20);
+      expect(endHor.altDeg).toBeGreaterThan(0);
+      expect(endHor.altDeg).toBeLessThan(startHor.altDeg);
+      expect(meteor.angularLengthDeg).toBeGreaterThan(10);
+
+      if (i === 0) {
+        expect(meteor.peakVmag).toBeLessThanOrEqual(-1.5);
+      }
+    }
+
+    const mid = slerpUnitVectors([0, 0, 1], [1, 0, 0], 0.5);
+    expect(Math.hypot(...mid)).toBeCloseTo(1, 5);
+    expect(mid[0]).toBeCloseTo(Math.SQRT1_2, 4);
+    expect(mid[2]).toBeCloseTo(Math.SQRT1_2, 4);
+  });
+
+  it('evaluates meteor flight brightness, post-burnout wake decay, and expiration', () => {
+    const meteor = spawnMeteorTrajectory({
+      nowMs: 1_000,
+      cameraAzDeg: 180,
+      cameraAltDeg: 20,
+      forceFireball: true,
+      random: () => 0.4,
+      idSuffix: 1,
+    });
+
+    expect(evaluateMeteorState(meteor, 950)).toBeNull();
+
+    const early = evaluateMeteorState(meteor, 1_000 + meteor.durationMs * 0.1)!;
+    const peak = evaluateMeteorState(meteor, 1_000 + meteor.durationMs * 0.68)!;
+    const wake = evaluateMeteorState(meteor, 1_000 + meteor.durationMs + meteor.wakeHoldMs * 0.4)!;
+    const expired = evaluateMeteorState(meteor, 1_000 + meteor.durationMs + meteor.wakeHoldMs + 10);
+
+    expect(early.isHeadActive).toBe(true);
+    expect(early.headProgress).toBeCloseTo(0.1, 3);
+    expect(peak.headBrightness).toBeGreaterThan(early.headBrightness);
+    expect(wake.isHeadActive).toBe(false);
+    expect(wake.headProgress).toBe(1);
+    expect(wake.headBrightness).toBe(0);
+    expect(wake.wakeAlpha).toBeGreaterThan(0);
+    expect(wake.wakeAlpha).toBeLessThan(1);
+    expect(expired).toBeNull();
+  });
+
+  it('manages wish meteors, automatic shower updates, and expiration pruning in MeteorShowerController', () => {
+    const controller = new MeteorShowerController();
+    expect(controller.getRateMode()).toBe('shower');
+    expect(controller.getMeteorsSpotted()).toBe(0);
+
+    controller.setRateMode('fireballs', 1_000);
+    expect(controller.getRateMode()).toBe('fireballs');
+
+    const wish = controller.triggerWishMeteor(2_000, 180, 20);
+    expect(controller.getMeteorsSpotted()).toBe(1);
+    expect(controller.getActiveCount()).toBe(1);
+    expect(controller.getLastMeteorLabel()).toContain('Fireball');
+
+    const startHor = worldVectorToAltAz(...wish.startDir);
+    const deltaAz = Math.abs(((startHor.azDeg - 180 + 540) % 360) - 180);
+    expect(deltaAz).toBeLessThanOrEqual(52.1);
+
+    const active = controller.update(2_200, true, 180, 20, false);
+    expect(active.length).toBe(1);
+    expect(active[0].id).toBe(wish.id);
+
+    // Advance past expiration while keeping disabled so no new automatic meteors spawn
+    const afterExpiry = controller.update(
+      2_000 + wish.durationMs + wish.wakeHoldMs + 100,
+      false,
+      180,
+      20,
+      false,
+    );
+    expect(afterExpiry.length).toBe(0);
+    expect(controller.getActiveCount()).toBe(0);
+  });
+
+  it('transitions CalmAudioController state deterministically without AudioContext', async () => {
+    const audio = new CalmAudioController();
+    expect(audio.getState()).toEqual({
+      isPlaying: false,
+      isMuted: false,
+      volumePercent: 65,
+      preset: 'campfire-music',
+    });
+
+    const started = await audio.start();
+    expect(started.isPlaying).toBe(true);
+
+    expect(audio.setVolume(120).volumePercent).toBe(100);
+    expect(audio.setVolume(-10).volumePercent).toBe(0);
+    expect(audio.setVolume(42).volumePercent).toBe(42);
+
+    expect(audio.toggleMuted().isMuted).toBe(true);
+    expect(audio.setMuted(false).isMuted).toBe(false);
+
+    expect(audio.setPreset('campfire-only').preset).toBe('campfire-only');
+    expect(audio.setPreset('music-only').preset).toBe('music-only');
+
+    expect(audio.stop().isPlaying).toBe(false);
+    audio.dispose();
   });
 });

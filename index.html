@@ -58,7 +58,7 @@
           <span class="location-caret" aria-hidden="true">▾</span>
         </button>
 
-        <div class="hud-actions-group" role="group" aria-label="Catalog search, sky tour, satellites, flights, and AR mode">
+        <div class="hud-actions-group" role="group" aria-label="Catalog search, sky tour, satellites, flights, AR mode, and calm campfire mode">
           <button
             id="search-trigger-btn"
             type="button"
@@ -111,6 +111,16 @@
             <span class="action-pill-icon" aria-hidden="true">⌖</span>
             <span>AR Gyro</span>
           </button>
+          <button
+            id="calm-mode-btn"
+            type="button"
+            class="hud-panel action-pill action-pill-calm"
+            aria-pressed="false"
+            aria-controls="calm-hud-banner"
+          >
+            <span class="action-pill-icon" aria-hidden="true">🔥</span>
+            <span>Calm Mode</span>
+          </button>
         </div>
 
         <div class="hud-panel telemetry-panel">
@@ -152,6 +162,46 @@
           <button id="ar-trim-reset" type="button" class="chip-btn" aria-label="Reset compass trim">Reset</button>
           <button id="ar-trim-right" type="button" class="chip-btn" aria-label="Trim compass heading plus 5 degrees">+5°</button>
           <button id="ar-exit-btn" type="button" class="chip-btn is-active" aria-label="Exit AR gyroscope mode">Exit AR</button>
+        </div>
+      </section>
+
+      <!-- Calm / Relax Mode Campfire, Music & Meteor Controls Banner -->
+      <section id="calm-hud-banner" class="hud-panel calm-hud-banner" hidden>
+        <div class="calm-hud-status">
+          <span class="badge badge-calm">🔥 CAMPFIRE</span>
+          <span id="calm-status-text" class="calm-status-text">Hearth &amp; ambient sky</span>
+          <span id="calm-meteor-count" class="calm-meteor-count mono">0 meteors</span>
+        </div>
+
+        <div class="calm-hud-audio" role="group" aria-label="Campfire and ambient music audio">
+          <button id="calm-audio-preset-both" type="button" class="chip-btn is-active" data-calm-audio="campfire-music" aria-pressed="true">Fire + Music</button>
+          <button id="calm-audio-preset-fire" type="button" class="chip-btn" data-calm-audio="campfire-only" aria-pressed="false">Fire Only</button>
+          <button id="calm-audio-preset-music" type="button" class="chip-btn" data-calm-audio="music-only" aria-pressed="false">Music Only</button>
+          <button id="calm-audio-mute-btn" type="button" class="chip-btn" aria-pressed="false">Mute</button>
+          <div class="calm-volume-wrap">
+            <label for="calm-volume-slider" class="sr-only">Calm mode soundscape volume</label>
+            <input
+              id="calm-volume-slider"
+              type="range"
+              class="time-scrub-slider calm-volume-slider"
+              min="0"
+              max="100"
+              step="1"
+              value="65"
+              aria-valuetext="65%"
+            />
+            <span id="calm-volume-readout" class="calm-volume-readout mono">65%</span>
+          </div>
+        </div>
+
+        <div class="calm-hud-controls" role="group" aria-label="Meteor shower and view controls">
+          <button type="button" class="chip-btn" data-meteor-rate="occasional" aria-pressed="false">Occasional</button>
+          <button type="button" class="chip-btn is-active" data-meteor-rate="shower" aria-pressed="true">Shower</button>
+          <button type="button" class="chip-btn" data-meteor-rate="fireballs" aria-pressed="false">Fireballs</button>
+          <button id="calm-wish-btn" type="button" class="chip-btn is-calm-accent">✦ Shoot Meteor</button>
+          <button id="calm-face-fire-btn" type="button" class="chip-btn">Face Fire</button>
+          <button id="calm-zen-btn" type="button" class="chip-btn" aria-pressed="false">Zen HUD</button>
+          <button id="calm-exit-btn" type="button" class="chip-btn is-active">Exit Calm</button>
         </div>
       </section>
 

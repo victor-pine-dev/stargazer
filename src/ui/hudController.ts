@@ -15,6 +15,12 @@ import type {
   AircraftSystemSnapshot,
   AircraftTelemetryState,
 } from '../astro/aircraft';
+import type { CalmModeSnapshot, MeteorRateMode } from '../astro/meteors';
+import {
+  CalmAudioController,
+  type CalmAudioPreset,
+  type CalmAudioState,
+} from '../services/calmAudioService';
 import type { GyroControllerState } from '../services/gyroService';
 import type { ScreenLabelItem } from '../render/constellationLayer';
 import type {
@@ -233,6 +239,22 @@ export class HudController {
   private readonly arTrimRightBtn: HTMLButtonElement;
   private readonly arExitBtn: HTMLButtonElement;
 
+  // Phase 7: Calm / Relax Mode (Campfire, Music & Meteors)
+  private readonly calmAudio = new CalmAudioController();
+  private readonly calmModeBtn: HTMLButtonElement;
+  private readonly calmHudBanner: HTMLElement;
+  private readonly calmStatusText: HTMLElement;
+  private readonly calmMeteorCount: HTMLElement;
+  private readonly calmAudioPresetButtons: NodeListOf<HTMLButtonElement>;
+  private readonly calmAudioMuteBtn: HTMLButtonElement;
+  private readonly calmVolumeSlider: HTMLInputElement;
+  private readonly calmVolumeReadout: HTMLElement;
+  private readonly calmMeteorRateButtons: NodeListOf<HTMLButtonElement>;
+  private readonly calmWishBtn: HTMLButtonElement;
+  private readonly calmFaceFireBtn: HTMLButtonElement;
+  private readonly calmZenBtn: HTMLButtonElement;
+  private readonly calmExitBtn: HTMLButtonElement;
+
   private readonly labelPool = new Map<string, HTMLSpanElement>();
 
   constructor(engine: SkyEngine, initialLocation: ObserverLocation) {
@@ -354,9 +376,25 @@ export class HudController {
     this.arTrimRightBtn = document.getElementById('ar-trim-right') as HTMLButtonElement;
     this.arExitBtn = document.getElementById('ar-exit-btn') as HTMLButtonElement;
 
+    this.calmModeBtn = document.getElementById('calm-mode-btn') as HTMLButtonElement;
+    this.calmHudBanner = document.getElementById('calm-hud-banner')!;
+    this.calmStatusText = document.getElementById('calm-status-text')!;
+    this.calmMeteorCount = document.getElementById('calm-meteor-count')!;
+    this.calmAudioPresetButtons = document.querySelectorAll<HTMLButtonElement>('[data-calm-audio]');
+    this.calmAudioMuteBtn = document.getElementById('calm-audio-mute-btn') as HTMLButtonElement;
+    this.calmVolumeSlider = document.getElementById('calm-volume-slider') as HTMLInputElement;
+    this.calmVolumeReadout = document.getElementById('calm-volume-readout')!;
+    this.calmMeteorRateButtons = document.querySelectorAll<HTMLButtonElement>('[data-meteor-rate]');
+    this.calmWishBtn = document.getElementById('calm-wish-btn') as HTMLButtonElement;
+    this.calmFaceFireBtn = document.getElementById('calm-face-fire-btn') as HTMLButtonElement;
+    this.calmZenBtn = document.getElementById('calm-zen-btn') as HTMLButtonElement;
+    this.calmExitBtn = document.getElementById('calm-exit-btn') as HTMLButtonElement;
+
     ensureModernDialogSupport(this.locationDialog);
     ensureModernDialogSupport(this.searchDialog);
     syncRangeSliderCssVars(this.timeScrubSlider);
+    syncRangeSliderCssVars(this.calmVolumeSlider);
+    this.syncCalmAudioUi(this.calmAudio.getState());
     this.renderLocationHeader(initialLocation);
     this.syncCustomFormInputs(initialLocation);
     this.renderPresetList('');
@@ -743,6 +781,74 @@ export class HudController {
         const state = await this.engine.toggleArGyro();
         this.updateArBanner(state);
       }
+    });
+
+    // Calm / Relax Mode (Campfire, Music & Meteors)
+    const setCalmModeActive = (enable: boolean) => {
+      if (enable) {
+        if (!this.tourPanel.hidden) this.setTourPanelOpen(false);
+        if (!this.issPanel.hidden) this.setIssPanelOpen(false);
+        if (!this.flightsPanel.hidden) this.setFlightsPanelOpen(false);
+        const snap = this.engine.toggleCalmMode(true);
+        this.syncCalmModeUi(snap);
+        this.syncLayerToggleButtons();
+        void this.calmAudio.start().then((audioState) => {
+          this.syncCalmAudioUi(audioState);
+        });
+      } else {
+        const snap = this.engine.toggleCalmMode(false);
+        const audioState = this.calmAudio.stop();
+        this.syncCalmModeUi(snap);
+        this.syncCalmAudioUi(audioState);
+      }
+    };
+
+    this.calmModeBtn.addEventListener('click', () => {
+      const currentlyEnabled = this.engine.getCalmModeSnapshot().enabled;
+      setCalmModeActive(!currentlyEnabled);
+    });
+
+    this.calmExitBtn.addEventListener('click', () => {
+      setCalmModeActive(false);
+    });
+
+    this.calmAudioPresetButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const preset = btn.dataset.calmAudio as CalmAudioPreset | undefined;
+        if (!preset) return;
+        this.syncCalmAudioUi(this.calmAudio.setPreset(preset));
+      });
+    });
+
+    this.calmAudioMuteBtn.addEventListener('click', () => {
+      this.syncCalmAudioUi(this.calmAudio.toggleMuted());
+    });
+
+    this.calmVolumeSlider.addEventListener('input', () => {
+      syncRangeSliderCssVars(this.calmVolumeSlider);
+      const volume = Number(this.calmVolumeSlider.value);
+      this.syncCalmAudioUi(this.calmAudio.setVolume(volume));
+    });
+
+    this.calmMeteorRateButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const rate = btn.dataset.meteorRate as MeteorRateMode | undefined;
+        if (!rate) return;
+        this.syncCalmModeUi(this.engine.setMeteorRate(rate));
+      });
+    });
+
+    this.calmWishBtn.addEventListener('click', () => {
+      this.engine.triggerWishMeteor();
+    });
+
+    this.calmFaceFireBtn.addEventListener('click', () => {
+      this.engine.faceCampfire();
+    });
+
+    this.calmZenBtn.addEventListener('click', () => {
+      const current = this.engine.getCalmModeSnapshot();
+      this.syncCalmModeUi(this.engine.setCalmZenHud(!current.zenHud));
     });
   }
 
@@ -1310,7 +1416,62 @@ export class HudController {
       isLiveRadarWindow,
     );
     this.updateArBanner(snapshot.arGyro);
+    this.syncCalmModeUi(snapshot.calmMode);
     this.renderProjectedLabels(snapshot.labels);
+  }
+
+  private syncCalmAudioUi(audioState: CalmAudioState): void {
+    this.calmAudioPresetButtons.forEach((btn) => {
+      const active = btn.dataset.calmAudio === audioState.preset;
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    });
+
+    this.calmAudioMuteBtn.classList.toggle('is-active', audioState.isMuted);
+    this.calmAudioMuteBtn.setAttribute('aria-pressed', String(audioState.isMuted));
+
+    if (document.activeElement !== this.calmVolumeSlider) {
+      this.calmVolumeSlider.value = String(audioState.volumePercent);
+      syncRangeSliderCssVars(this.calmVolumeSlider);
+    }
+    this.calmVolumeSlider.setAttribute('aria-valuetext', `${audioState.volumePercent}%`);
+    this.calmVolumeReadout.textContent = `${audioState.volumePercent}%`;
+  }
+
+  private syncCalmModeUi(calmMode: CalmModeSnapshot): void {
+    const wasHidden = this.calmHudBanner.hidden;
+    if (!calmMode.enabled && wasHidden) {
+      return;
+    }
+
+    this.calmModeBtn.classList.toggle('is-active', calmMode.enabled);
+    this.calmModeBtn.setAttribute('aria-pressed', String(calmMode.enabled));
+    this.calmHudBanner.hidden = !calmMode.enabled;
+    document.body.classList.toggle('is-calm-mode', calmMode.enabled);
+    document.body.classList.toggle('is-calm-zen', calmMode.enabled && calmMode.zenHud);
+
+    if (!calmMode.enabled) return;
+
+    const countText = `${calmMode.meteorsSpotted} ${calmMode.meteorsSpotted === 1 ? 'meteor' : 'meteors'}`;
+    if (this.calmMeteorCount.textContent !== countText) {
+      this.calmMeteorCount.textContent = countText;
+    }
+
+    const statusText = calmMode.lastMeteorLabel
+      ? `Latest: ${calmMode.lastMeteorLabel}`
+      : 'Hearth & ambient sky';
+    if (this.calmStatusText.textContent !== statusText) {
+      this.calmStatusText.textContent = statusText;
+    }
+
+    this.calmMeteorRateButtons.forEach((btn) => {
+      const active = btn.dataset.meteorRate === calmMode.meteorRate;
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-pressed', String(active));
+    });
+
+    this.calmZenBtn.classList.toggle('is-active', calmMode.zenHud);
+    this.calmZenBtn.setAttribute('aria-pressed', String(calmMode.zenHud));
   }
 
   private updateFlightsDrawer(

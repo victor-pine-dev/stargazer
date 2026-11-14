@@ -37,14 +37,23 @@ import {
   type AdsbSourceKind,
   type AircraftSystemSnapshot,
 } from '../astro/aircraft';
+import {
+  evaluateMeteorState,
+  MeteorShowerController,
+  type CalmModeSnapshot,
+  type EvaluatedMeteorState,
+  type MeteorRateMode,
+} from '../astro/meteors';
 import type { LoadedCelestialData } from '../data/catalogLoader';
 import { GyroSensorController, type GyroControllerState } from '../services/gyroService';
 import type { ObserverLocation } from '../services/locationService';
 import { AC_SPHERE_RADIUS, createAircraftLayer } from './aircraftLayer';
 import { createAtmosphereDome } from './atmosphereDome';
+import { createCampfireLayer } from './campfireLayer';
 import { createCompassHorizon } from './compassHorizon';
 import { createConstellationLayer, type ScreenLabelItem } from './constellationLayer';
 import { createDsoLayer } from './dsoLayer';
+import { createMeteorLayer } from './meteorLayer';
 import { createSatelliteLayer } from './satelliteLayer';
 import { createSolarSystemLayer } from './solarSystemLayer';
 import { createStarfieldLayer } from './starfieldLayer';
@@ -92,6 +101,7 @@ export interface TelemetrySnapshot {
   satellites: SatelliteSystemSnapshot;
   aircraft: AircraftSystemSnapshot;
   arGyro: GyroControllerState;
+  calmMode: CalmModeSnapshot;
 }
 
 export interface SkyEngineOptions {
@@ -146,9 +156,14 @@ export class SkyEngine {
   private readonly aircraftLayer: ReturnType<typeof createAircraftLayer>;
   private readonly constellations: ReturnType<typeof createConstellationLayer>;
   private readonly horizon: ReturnType<typeof createCompassHorizon>;
+  private readonly meteorLayer: ReturnType<typeof createMeteorLayer>;
+  private readonly campfireLayer: ReturnType<typeof createCampfireLayer>;
+  private readonly meteorController: MeteorShowerController;
   private readonly satTracker: SatelliteTrackerController;
   private readonly aircraftTracker: AircraftTrackerController;
   private readonly gyro: GyroSensorController;
+  private calmModeEnabled = false;
+  private calmZenHud = false;
 
   private readonly dsoPickAnchors: Array<{ id: string; mag: number; j2000Vec: THREE.Vector3 }>;
 
@@ -259,6 +274,9 @@ export class SkyEngine {
       options.catalog.namedStarList,
     );
     this.horizon = createCompassHorizon();
+    this.meteorLayer = createMeteorLayer();
+    this.campfireLayer = createCampfireLayer();
+    this.meteorController = new MeteorShowerController();
 
     this.scene.add(this.atmosphere.mesh);
     this.scene.add(this.starfield.mesh);
@@ -268,6 +286,8 @@ export class SkyEngine {
     this.scene.add(this.aircraftLayer.group);
     this.scene.add(this.constellations.group);
     this.scene.add(this.horizon.group);
+    this.scene.add(this.meteorLayer.group);
+    this.scene.add(this.campfireLayer.group);
 
     this.satTracker = new SatelliteTrackerController(
       this.location,
@@ -679,6 +699,73 @@ export class SkyEngine {
 
   getTonightsBestTour(): { stops: TourStopItem[]; evalDate: Date; isDaylightPreview: boolean } {
     return buildTonightsBestTour(this.catalog, this.location, new Date(this.simTimestampMs));
+  }
+
+  toggleCalmMode(force?: boolean): CalmModeSnapshot {
+    const next = force !== undefined ? force : !this.calmModeEnabled;
+    this.calmModeEnabled = next;
+
+    if (next) {
+      if (this.lastEphemeris.sun.altDeg > -6) {
+        this.setTimeMode('tonight');
+      }
+      this.setLayers({ atmosphere: true, horizon: true });
+      this.selectedRef = null;
+      this.isTrackingObject = false;
+      this.onSelectObject?.(null);
+      this.flyTo(180, 20, 76);
+      this.meteorController.scheduleWelcomeMeteor(performance.now(), 600);
+    } else {
+      this.calmZenHud = false;
+      this.meteorController.clear();
+      this.campfireLayer.update({ elapsedSec: 0, visible: false, reducedMotion: false });
+      this.meteorLayer.update({
+        meteors: [],
+        fovDeg: this.fovDeg,
+        viewportWidth: this.viewportWidth,
+        viewportHeight: this.viewportHeight,
+        pixelRatio: 1,
+        visible: false,
+      });
+    }
+
+    this.lastHudPushMs = 0;
+    return this.getCalmModeSnapshot();
+  }
+
+  faceCampfire(): void {
+    this.flyTo(180, 20, 76);
+  }
+
+  setCalmZenHud(zen: boolean): CalmModeSnapshot {
+    this.calmZenHud = Boolean(zen && this.calmModeEnabled);
+    this.lastHudPushMs = 0;
+    return this.getCalmModeSnapshot();
+  }
+
+  setMeteorRate(rate: MeteorRateMode): CalmModeSnapshot {
+    this.meteorController.setRateMode(rate, performance.now());
+    this.lastHudPushMs = 0;
+    return this.getCalmModeSnapshot();
+  }
+
+  triggerWishMeteor(): EvaluatedMeteorState | null {
+    if (!this.calmModeEnabled) return null;
+    const now = performance.now();
+    const meteor = this.meteorController.triggerWishMeteor(now, this.azDeg, this.altDeg);
+    this.lastHudPushMs = 0;
+    return evaluateMeteorState(meteor, now);
+  }
+
+  getCalmModeSnapshot(): CalmModeSnapshot {
+    return {
+      enabled: this.calmModeEnabled,
+      zenHud: this.calmZenHud,
+      meteorRate: this.meteorController.getRateMode(),
+      meteorsSpotted: this.meteorController.getMeteorsSpotted(),
+      activeMeteorCount: this.meteorController.getActiveCount(),
+      lastMeteorLabel: this.meteorController.getLastMeteorLabel(),
+    };
   }
 
   private projectWorldDirToReticle(worldDir: [number, number, number]): ReticleScreenPosition {
@@ -1224,6 +1311,30 @@ export class SkyEngine {
       });
       this.horizon.setVisible(this.layers.horizon);
 
+      const reducedMotion =
+        typeof window !== 'undefined' &&
+        Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+      const activeMeteors = this.meteorController.update(
+        nowMs,
+        this.calmModeEnabled,
+        this.azDeg,
+        this.altDeg,
+        reducedMotion,
+      );
+      this.meteorLayer.update({
+        meteors: activeMeteors,
+        fovDeg: this.fovDeg,
+        viewportWidth: this.viewportWidth,
+        viewportHeight: this.viewportHeight,
+        pixelRatio: dpr,
+        visible: this.calmModeEnabled && activeMeteors.length > 0,
+      });
+      this.campfireLayer.update({
+        elapsedSec,
+        visible: this.calmModeEnabled,
+        reducedMotion,
+      });
+
       this.renderer.render(this.scene, this.camera);
 
       // Update projected HTML labels & HUD telemetry at ~30 Hz for crisp motion with minimal DOM churn
@@ -1335,6 +1446,7 @@ export class SkyEngine {
           satellites: satSnap,
           aircraft: acSnap,
           arGyro: this.gyro.getState(),
+          calmMode: this.getCalmModeSnapshot(),
         });
       }
 
@@ -1365,6 +1477,8 @@ export class SkyEngine {
     this.aircraftLayer.dispose();
     this.constellations.dispose();
     this.horizon.dispose();
+    this.meteorLayer.dispose();
+    this.campfireLayer.dispose();
     this.renderer.dispose();
   }
 }
