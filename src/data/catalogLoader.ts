@@ -23,6 +23,28 @@ export interface ConstellationRecord {
   bounds: Array<Array<[number, number]>>;
 }
 
+export type DsoMorphology =
+  | 'galaxy'
+  | 'nebula'
+  | 'planetary_nebula'
+  | 'globular_cluster'
+  | 'open_cluster';
+
+export interface DsoRecord {
+  id: string;
+  catalog: 'Messier' | 'Caldwell';
+  catalogNumber: number;
+  ngc: string;
+  name: string;
+  type: DsoMorphology;
+  rawType: string;
+  mag: number;
+  sizeArcmin: number;
+  minorArcmin: number;
+  raRad: number;
+  decRad: number;
+}
+
 export interface StarCatalogData {
   count: number;
   /** Packed J2000 unit directions [x, y, z] per star */
@@ -38,6 +60,7 @@ export interface LoadedCelestialData {
   constellations: ConstellationRecord[];
   starNames: Map<number, NamedStarEntry>;
   namedStarList: NamedStarEntry[];
+  dsos: DsoRecord[];
 }
 
 /**
@@ -98,25 +121,27 @@ export function parseStarBinary(buffer: ArrayBuffer): StarCatalogData {
 }
 
 /**
- * Fetches stars.bin, constellations.json, and star-names.json in parallel.
+ * Fetches stars.bin, constellations.json, star-names.json, and dso.json in parallel.
  */
 export async function loadCelestialCatalog(): Promise<LoadedCelestialData> {
-  const [binRes, constRes, namesRes] = await Promise.all([
+  const [binRes, constRes, namesRes, dsoRes] = await Promise.all([
     fetch('/data/stars.bin'),
     fetch('/data/constellations.json'),
     fetch('/data/star-names.json'),
+    fetch('/data/dso.json'),
   ]);
 
-  if (!binRes.ok || !constRes.ok || !namesRes.ok) {
+  if (!binRes.ok || !constRes.ok || !namesRes.ok || !dsoRes.ok) {
     throw new Error(
-      `Failed to load celestial data (stars: ${binRes.status}, constellations: ${constRes.status}, names: ${namesRes.status})`,
+      `Failed to load celestial data (stars: ${binRes.status}, constellations: ${constRes.status}, names: ${namesRes.status}, dso: ${dsoRes.status})`,
     );
   }
 
-  const [starBuffer, constellations, namesJson] = await Promise.all([
+  const [starBuffer, constellations, namesJson, dsos] = await Promise.all([
     binRes.arrayBuffer(),
     constRes.json() as Promise<ConstellationRecord[]>,
     namesRes.json() as Promise<Record<string, NamedStarEntry>>,
+    dsoRes.json() as Promise<DsoRecord[]>,
   ]);
 
   const stars = parseStarBinary(starBuffer);
@@ -130,11 +155,13 @@ export async function loadCelestialCatalog(): Promise<LoadedCelestialData> {
     }
   }
   namedStarList.sort((a, b) => a.mag - b.mag);
+  dsos.sort((a, b) => a.mag - b.mag);
 
   return {
     stars,
     constellations,
     starNames,
     namedStarList,
+    dsos,
   };
 }

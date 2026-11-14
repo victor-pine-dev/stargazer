@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { parseStarBinary, type ConstellationRecord, type NamedStarEntry } from '../../data/catalogLoader';
+import { parseStarBinary, type ConstellationRecord, type DsoRecord, type NamedStarEntry } from '../../data/catalogLoader';
 import {
   altAzToWorldVector,
   computeEquatorialToWorldMatrix4,
@@ -13,7 +13,19 @@ import {
   raDecToJ2000UnitVector,
   worldVectorToAltAz,
 } from '../coordinates';
+import { classifyLunarPhase, computeSolarSystemEphemeris } from '../solarSystem';
 import { bvToKelvin, bvToRGB, computeAirmass, magnitudeToFlux } from '../spectral';
+import {
+  buildTonightsBestTour,
+  bvToSpectralClass,
+  computeObjectTelemetry,
+  computeRiseTransitSet,
+  estimateStarDistanceLabel,
+  formatDsoDistanceLabel,
+  searchCelestialCatalog,
+  slerpHorizontalLook,
+} from '../celestialIndex';
+import { DEFAULT_LOCATION } from '../../services/locationService';
 
 describe('Astronomical Coordinate & Sidereal Math', () => {
   it('converts RA/Dec to orthonormal J2000 unit vectors', () => {
@@ -165,5 +177,292 @@ describe('Celestial Binary & Constellation Dataset Integrity', () => {
     expect(names['32349']?.name).toBe('Sirius');
     expect(names['11767']?.name).toBe('Polaris');
     expect(names['91262']?.name).toBe('Vega');
+  });
+
+  it('contains all 219 Messier (110) and Caldwell (109) Deep Sky Objects with valid metadata', () => {
+    const dsoPath = resolve(process.cwd(), 'public/data/dso.json');
+    const dsos = JSON.parse(readFileSync(dsoPath, 'utf8')) as DsoRecord[];
+    expect(dsos.length).toBe(219);
+
+    const messier = dsos.filter((d) => d.catalog === 'Messier');
+    const caldwell = dsos.filter((d) => d.catalog === 'Caldwell');
+    expect(messier.length).toBe(110);
+    expect(caldwell.length).toBe(109);
+
+    const byId = new Map(dsos.map((d) => [d.id, d]));
+    expect(byId.get('M31')?.type).toBe('galaxy');
+    expect(byId.get('M42')?.type).toBe('nebula');
+    expect(byId.get('M45')?.type).toBe('open_cluster');
+    expect(byId.get('M13')?.type).toBe('globular_cluster');
+    expect(byId.get('M57')?.type).toBe('planetary_nebula');
+    expect(byId.get('C80')?.name).toBe('Omega Centauri');
+    expect(byId.get('C106')?.name).toBe('47 Tucanae');
+
+    for (const dso of dsos) {
+      expect(Number.isFinite(dso.raRad)).toBe(true);
+      expect(Number.isFinite(dso.decRad)).toBe(true);
+      expect(dso.raRad).toBeGreaterThanOrEqual(0);
+      expect(dso.raRad).toBeLessThan(Math.PI * 2 + 1e-4);
+      expect(dso.decRad).toBeGreaterThanOrEqual(-Math.PI / 2);
+      expect(dso.decRad).toBeLessThanOrEqual(Math.PI / 2);
+      expect(Number.isFinite(dso.mag)).toBe(true);
+      expect(dso.sizeArcmin).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('Solar System Ephemeris & 3D Lunar Phase Math', () => {
+  it('classifies synodic lunar longitudes into all 8 lunar phase names', () => {
+    expect(classifyLunarPhase(0)).toBe('New Moon');
+    expect(classifyLunarPhase(45)).toBe('Waxing Crescent');
+    expect(classifyLunarPhase(90)).toBe('First Quarter');
+    expect(classifyLunarPhase(135)).toBe('Waxing Gibbous');
+    expect(classifyLunarPhase(180)).toBe('Full Moon');
+    expect(classifyLunarPhase(225)).toBe('Waning Gibbous');
+    expect(classifyLunarPhase(270)).toBe('Third Quarter');
+    expect(classifyLunarPhase(315)).toBe('Waning Crescent');
+  });
+
+  it('computes topocentric positions, magnitudes, and distances for Sun, Moon, and Mercury-Neptune', () => {
+    const date = new Date('2026-11-14T23:00:00Z');
+    const eph = computeSolarSystemEphemeris(date, 40.7128, -74.006, 10);
+
+    expect(eph.sun.id).toBe('sun');
+    expect(eph.sun.vmag).toBeLessThan(-26);
+    expect(eph.sun.distAu).toBeCloseTo(0.989, 2);
+
+    expect(eph.moon.id).toBe('moon');
+    expect(eph.moon.phaseName).toBe('Waxing Crescent');
+    expect(eph.moon.waxing).toBe(true);
+    expect(eph.moon.phaseFraction).toBeGreaterThan(0.2);
+    expect(eph.moon.phaseFraction).toBeLessThan(0.35);
+
+    expect(eph.planets.map((p) => p.id)).toEqual([
+      'mercury',
+      'venus',
+      'mars',
+      'jupiter',
+      'saturn',
+      'uranus',
+      'neptune',
+    ]);
+
+    for (const p of eph.planets) {
+      expect(Number.isFinite(p.altDeg)).toBe(true);
+      expect(Number.isFinite(p.azDeg)).toBe(true);
+      expect(Number.isFinite(p.vmag)).toBe(true);
+      expect(p.distAu).toBeGreaterThan(0);
+      const norm = Math.hypot(p.worldDir[0], p.worldDir[1], p.worldDir[2]);
+      expect(norm).toBeCloseTo(1, 5);
+    }
+
+    const saturn = eph.planets.find((p) => p.id === 'saturn')!;
+    expect(typeof saturn.ringTiltDeg).toBe('number');
+  });
+
+  it('aligns 3D sunFromMoonWorldDir opposite observer at New Moon and toward observer at Full Moon', () => {
+    // New Moon (2026-11-09T07:02:42Z)
+    const newMoonEph = computeSolarSystemEphemeris(new Date('2026-11-09T07:02:42Z'), 19.8207, -155.468, 4205);
+    expect(newMoonEph.moon.phaseName).toBe('New Moon');
+    expect(newMoonEph.moon.phaseFraction).toBeLessThan(0.02);
+    const toObserverNew = new THREE.Vector3(...newMoonEph.moon.worldDir).negate();
+    const sunFromMoonNew = new THREE.Vector3(...newMoonEph.moon.sunFromMoonWorldDir);
+    expect(sunFromMoonNew.dot(toObserverNew)).toBeLessThan(-0.95);
+
+    // Full Moon (2026-11-24T14:54:04Z)
+    const fullMoonEph = computeSolarSystemEphemeris(new Date('2026-11-24T14:54:04Z'), 19.8207, -155.468, 4205);
+    expect(fullMoonEph.moon.phaseName).toBe('Full Moon');
+    expect(fullMoonEph.moon.phaseFraction).toBeGreaterThan(0.98);
+    const toObserverFull = new THREE.Vector3(...fullMoonEph.moon.worldDir).negate();
+    const sunFromMoonFull = new THREE.Vector3(...fullMoonEph.moon.sunFromMoonWorldDir);
+    expect(sunFromMoonFull.dot(toObserverFull)).toBeGreaterThan(0.95);
+  });
+});
+
+describe('Phase 3 Celestial Index, Slerp, Search & Tonight\'s Best Tour', () => {
+  const loadTestCatalog = () => {
+    const binBuf = readFileSync(resolve(process.cwd(), 'public/data/stars.bin'));
+    const binArr = binBuf.buffer.slice(binBuf.byteOffset, binBuf.byteOffset + binBuf.byteLength);
+    const stars = parseStarBinary(binArr);
+    const starNamesRaw = JSON.parse(
+      readFileSync(resolve(process.cwd(), 'public/data/star-names.json'), 'utf8'),
+    ) as Record<string, NamedStarEntry>;
+    const starNames = new Map<number, NamedStarEntry>();
+    for (const entry of Object.values(starNamesRaw)) {
+      starNames.set(entry.hip, entry);
+    }
+    const namedStarList = Object.values(starNamesRaw)
+      .filter((entry) => Boolean(entry.name) && entry.mag <= 3.0)
+      .sort((a, b) => a.mag - b.mag);
+    const constellations = JSON.parse(
+      readFileSync(resolve(process.cwd(), 'public/data/constellations.json'), 'utf8'),
+    ) as ConstellationRecord[];
+    const dsos = JSON.parse(
+      readFileSync(resolve(process.cwd(), 'public/data/dso.json'), 'utf8'),
+    ) as DsoRecord[];
+
+    return {
+      stars,
+      starNames,
+      namedStarList,
+      constellations,
+      dsos,
+    };
+  };
+
+  it('computes spectral classifications and stellar/DSO distance labels', () => {
+    expect(bvToSpectralClass(0.0, 32349)).toMatch(/^A1V · /);
+    expect(bvToSpectralClass(1.85, 27989)).toMatch(/^M1-M2Ia · /);
+    expect(bvToSpectralClass(0.65)).toMatch(/^G\dV · /);
+
+    expect(estimateStarDistanceLabel(-1.46, 0.0, 32349)).toBe('8.60 ly');
+    expect(estimateStarDistanceLabel(1.98, 0.63, 11767)).toBe('433 ly');
+    expect(estimateStarDistanceLabel(4.8, 0.65)).toMatch(/^~\d+ ly$/);
+
+    const catalog = loadTestCatalog();
+    const m31 = catalog.dsos.find((d) => d.id === 'M31')!;
+    const m42 = catalog.dsos.find((d) => d.id === 'M42')!;
+    expect(formatDsoDistanceLabel(m31)).toBe('2.54 Mly');
+    expect(formatDsoDistanceLabel(m42)).toBe('1,344 ly');
+    expect(
+      formatDsoDistanceLabel({
+        ...m31,
+        id: 'C999',
+        catalog: 'Caldwell',
+        name: 'Test Galaxy',
+        ngc: 'NGC9999',
+        type: 'galaxy',
+        mag: 8.5,
+      }),
+    ).toBe('~25 Mly');
+  });
+
+  it('computes circumpolar, never-rises, and normal Rise/Transit/Set times', () => {
+    const date = new Date('2026-11-14T22:00:00Z');
+    const nycLat = 40.7128;
+    const nycLon = -74.006;
+
+    // Polaris (~Dec +89.26°) is circumpolar from NYC
+    const polarisRts = computeRiseTransitSet(2.5303 * 15 * DEG_TO_RAD, 89.264 * DEG_TO_RAD, date, nycLat, nycLon);
+    expect(polarisRts.state).toBe('circumpolar');
+    expect(polarisRts.rise).toBe('Circumpolar');
+    expect(polarisRts.set).toBe('Circumpolar');
+    expect(polarisRts.transit).toMatch(/^\d{2}:\d{2}$/);
+    expect(polarisRts.transitAltDeg).toBeCloseTo(90 - Math.abs(nycLat - 89.264), 3);
+
+    // Acrux (Alpha Crucis, Dec -63.1°) never rises in NYC
+    const acruxRts = computeRiseTransitSet(12.443 * 15 * DEG_TO_RAD, -63.099 * DEG_TO_RAD, date, nycLat, nycLon);
+    expect(acruxRts.state).toBe('never_rises');
+    expect(acruxRts.rise).toBe('Never rises');
+    expect(acruxRts.set).toBe('Never rises');
+
+    // Sirius (RA 6.7525h, Dec -16.716°) rises and sets cleanly from NYC
+    const siriusRts = computeRiseTransitSet(6.7525 * 15 * DEG_TO_RAD, -16.7161 * DEG_TO_RAD, date, nycLat, nycLon);
+    expect(siriusRts.state).toBe('normal');
+    expect(siriusRts.rise).toMatch(/^\d{2}:\d{2}$/);
+    expect(siriusRts.transit).toMatch(/^\d{2}:\d{2}$/);
+    expect(siriusRts.set).toMatch(/^\d{2}:\d{2}$/);
+    expect(siriusRts.transitAltDeg).toBeCloseTo(90 - Math.abs(nycLat - (-16.7161)), 3);
+  });
+
+  it('interpolates camera look direction along shortest great-circle arc across 0/360 azimuth wrap', () => {
+    const start = slerpHorizontalLook(350, 20, 10, 40, 0);
+    expect(start.azDeg).toBeCloseTo(350, 4);
+    expect(start.altDeg).toBeCloseTo(20, 4);
+
+    const end = slerpHorizontalLook(350, 20, 10, 40, 1);
+    expect(end.azDeg).toBeCloseTo(10, 4);
+    expect(end.altDeg).toBeCloseTo(40, 4);
+
+    // Midpoint between Az 350° and Az 10° must pass near Az 0° (never around Az 180°)
+    const mid = slerpHorizontalLook(350, 20, 10, 40, 0.5);
+    const signedMidAz = mid.azDeg > 180 ? mid.azDeg - 360 : mid.azDeg;
+    expect(Math.abs(signedMidAz)).toBeLessThan(2);
+    expect(mid.altDeg).toBeGreaterThan(29);
+    expect(mid.altDeg).toBeLessThan(31.5);
+  });
+
+  it('searches across planets, named/HIP stars, DSOs, and constellations and builds telemetry', () => {
+    const catalog = loadTestCatalog();
+    const date = new Date('2026-11-15T04:00:00Z');
+    const nycLocation = {
+      ...DEFAULT_LOCATION,
+      name: 'New York City',
+      latitude: 40.7128,
+      longitude: -74.006,
+      elevation: 10,
+    };
+    const eqToWorld = computeEquatorialToWorldMatrix4(date, nycLocation.latitude, nycLocation.longitude);
+    const eph = computeSolarSystemEphemeris(date, nycLocation.latitude, nycLocation.longitude, nycLocation.elevation);
+
+    const saturnResults = searchCelestialCatalog('Saturn', 'all', catalog, eph, eqToWorld);
+    expect(saturnResults.length).toBeGreaterThan(0);
+    expect(saturnResults[0].id).toBe('body-saturn');
+
+    const siriusResults = searchCelestialCatalog('Sirius', 'star', catalog, eph, eqToWorld);
+    expect(siriusResults.some((item) => item.id === 'star-32349')).toBe(true);
+
+    const hipResults = searchCelestialCatalog('HIP 32349', 'star', catalog, eph, eqToWorld);
+    expect(hipResults[0]?.id).toBe('star-32349');
+
+    const m31Results = searchCelestialCatalog('M31', 'dso', catalog, eph, eqToWorld);
+    expect(m31Results[0]?.id).toBe('dso-M31');
+
+    const orionResults = searchCelestialCatalog('Orion', 'constellation', catalog, eph, eqToWorld);
+    expect(orionResults.some((item) => item.name.toLowerCase().includes('orion'))).toBe(true);
+
+    const saturnTel = computeObjectTelemetry(
+      { id: 'body-saturn', kind: 'planet', bodyId: 'saturn' },
+      catalog,
+      eph,
+      eqToWorld,
+      date,
+      nycLocation,
+    );
+    expect(saturnTel).not.toBeNull();
+    expect(saturnTel?.name).toBe('Saturn');
+    expect(saturnTel?.distanceLabel).toMatch(/AU$/);
+    expect(saturnTel?.subtitle).toContain('Ring tilt');
+
+    const siriusItem = siriusResults.find((r) => r.id === 'star-32349')!;
+    const siriusTel = computeObjectTelemetry(siriusItem.ref, catalog, eph, eqToWorld, date, nycLocation);
+    expect(siriusTel).not.toBeNull();
+    expect(siriusTel?.distanceLabel).toBe('8.60 ly');
+    expect(siriusTel?.spectralOrMorphology).toMatch(/^A1V/);
+
+    const m31Tel = computeObjectTelemetry(
+      { id: 'dso-M31', kind: 'dso', dsoId: 'M31' },
+      catalog,
+      eph,
+      eqToWorld,
+      date,
+      nycLocation,
+    );
+    expect(m31Tel).not.toBeNull();
+    expect(m31Tel?.distanceLabel).toBe('2.54 Mly');
+    expect(m31Tel?.rts.state).toBe('normal');
+    expect(m31Tel?.rts.transitAltDeg).toBeGreaterThan(88);
+  });
+
+  it('ranks Tonight\'s Best tour stops above the horizon cleanly', () => {
+    const catalog = loadTestCatalog();
+    const nycLocation = {
+      ...DEFAULT_LOCATION,
+      name: 'New York City',
+      latitude: 40.7128,
+      longitude: -74.006,
+      elevation: 10,
+    };
+
+    // Daylight UTC noon in NYC -> should auto-evaluate evening window
+    const daylightTour = buildTonightsBestTour(catalog, nycLocation, new Date('2026-11-14T17:00:00Z'));
+    expect(daylightTour.isDaylightPreview).toBe(true);
+    expect(daylightTour.stops.length).toBeGreaterThanOrEqual(6);
+    expect(daylightTour.stops.length).toBeLessThanOrEqual(10);
+
+    daylightTour.stops.forEach((stop, index) => {
+      expect(stop.stepIndex).toBe(index);
+      expect(stop.altDeg).toBeGreaterThanOrEqual(8);
+    });
   });
 });

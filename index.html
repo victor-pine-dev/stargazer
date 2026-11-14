@@ -11,7 +11,9 @@
       <canvas id="sky-canvas" aria-label="Interactive GPU celestial sky viewport"></canvas>
 
       <!-- Projected constellation, star, and compass labels -->
-      <div id="sky-labels-layer" aria-hidden="true"></div>
+      <div id="sky-labels-layer" aria-hidden="true">
+        <div id="sky-reticle" class="sky-reticle" hidden></div>
+      </div>
 
       <!-- Loading overlay while stars.bin and WebGPU/WebGL2 initialize -->
       <div id="loading-overlay" role="status" aria-live="polite">
@@ -56,6 +58,31 @@
           <span class="location-caret" aria-hidden="true">▾</span>
         </button>
 
+        <div class="hud-actions-group" role="group" aria-label="Catalog search and sky tour">
+          <button
+            id="search-trigger-btn"
+            type="button"
+            class="hud-panel action-pill"
+            command="show-modal"
+            commandfor="search-dialog"
+            aria-label="Search celestial objects (Command or Control K)"
+          >
+            <span class="action-pill-icon" aria-hidden="true">⌕</span>
+            <span>Search</span>
+            <kbd class="kbd-hint">⌘K</kbd>
+          </button>
+          <button
+            id="tour-toggle-btn"
+            type="button"
+            class="hud-panel action-pill"
+            aria-expanded="false"
+            aria-controls="tour-panel"
+          >
+            <span class="action-pill-icon" aria-hidden="true">✦</span>
+            <span>Tonight's Best</span>
+          </button>
+        </div>
+
         <div class="hud-panel telemetry-panel">
           <div class="telemetry-row">
             <div class="metric-cell">
@@ -70,6 +97,10 @@
               <span class="metric-label">SOLAR STATE</span>
               <span id="sun-readout" class="metric-value">—</span>
             </div>
+            <div class="metric-cell">
+              <span class="metric-label">LUNAR PHASE</span>
+              <span id="moon-readout" class="metric-value">—</span>
+            </div>
           </div>
           <div class="time-mode-group" role="group" aria-label="Sky simulation time mode">
             <button type="button" class="chip-btn is-active" data-time-mode="live">Live Now</button>
@@ -79,34 +110,185 @@
         </div>
       </header>
 
-      <!-- Bottom Control Dock -->
-      <footer class="hud-bottom">
-        <div class="hud-panel look-panel">
-          <div class="look-readout">
-            <span><abbr title="Azimuth">AZ</abbr> <strong id="az-readout" class="mono">180.0° S</strong></span>
-            <span><abbr title="Altitude">ALT</abbr> <strong id="alt-readout" class="mono">+32.0°</strong></span>
-            <span><abbr title="Field of View">FOV</abbr> <strong id="fov-readout" class="mono">72°</strong></span>
+      <!-- "Tonight's Best" Guided Sky Tour Drawer -->
+      <aside id="tour-panel" class="hud-panel tour-panel" aria-labelledby="tour-panel-title" hidden>
+        <header class="side-panel-header">
+          <div>
+            <h2 id="tour-panel-title" class="side-panel-title">Tonight's Best Sky Tour</h2>
+            <p id="tour-window-label" class="side-panel-subtitle">Curated targets for your sky window</p>
           </div>
-          <div class="zoom-controls" role="group" aria-label="Field of view zoom">
-            <button id="zoom-in-btn" type="button" class="icon-btn" title="Zoom in (narrow FOV)" aria-label="Zoom in">+</button>
-            <button id="zoom-out-btn" type="button" class="icon-btn" title="Zoom out (wide FOV)" aria-label="Zoom out">−</button>
-          </div>
+          <button
+            id="tour-close-btn"
+            type="button"
+            class="dialog-close"
+            aria-label="Close Tonight's Best tour"
+          >
+            ✕
+          </button>
+        </header>
+
+        <div class="tour-transport">
+          <button id="tour-prev-btn" type="button" class="chip-btn">← Prev</button>
+          <span id="tour-step-readout" class="tour-step-readout mono">Step 1 / 10</span>
+          <button id="tour-next-btn" type="button" class="chip-btn">Next →</button>
         </div>
 
-        <nav class="hud-panel compass-nav" aria-label="Quick sky orientation">
-          <button type="button" class="chip-btn" data-look-az="0" data-look-alt="25">N</button>
-          <button type="button" class="chip-btn" data-look-az="90" data-look-alt="25">E</button>
-          <button type="button" class="chip-btn" data-look-az="180" data-look-alt="25">S</button>
-          <button type="button" class="chip-btn" data-look-az="270" data-look-alt="25">W</button>
-          <button type="button" class="chip-btn" data-look-az="180" data-look-alt="89">Zenith</button>
-        </nav>
+        <ol id="tour-stop-list" class="tour-stop-list" role="list"></ol>
+      </aside>
 
-        <div class="hud-panel layers-panel" role="group" aria-label="Celestial display layers">
-          <button type="button" class="chip-btn is-active" data-layer="constellations" aria-pressed="true">Constellations</button>
-          <button type="button" class="chip-btn" data-layer="boundaries" aria-pressed="false">Boundaries</button>
-          <button type="button" class="chip-btn is-active" data-layer="labels" aria-pressed="true">Labels</button>
-          <button type="button" class="chip-btn is-active" data-layer="atmosphere" aria-pressed="true">Atmosphere</button>
-          <button type="button" class="chip-btn is-active" data-layer="horizon" aria-pressed="true">Horizon</button>
+      <!-- Click-to-Inspect Live Telemetry Card -->
+      <aside id="inspect-card" class="hud-panel inspect-card" aria-labelledby="inspect-title" hidden>
+        <header class="side-panel-header">
+          <div class="inspect-title-wrap">
+            <div class="inspect-meta-row">
+              <span id="inspect-color-dot" class="inspect-color-dot" aria-hidden="true"></span>
+              <span id="inspect-badge" class="badge badge-subtle">STAR</span>
+              <span id="inspect-horizon-badge" class="badge badge-horizon">ABOVE HORIZON</span>
+            </div>
+            <h2 id="inspect-title" class="side-panel-title">—</h2>
+            <p id="inspect-subtitle" class="side-panel-subtitle">—</p>
+          </div>
+          <button
+            id="inspect-close-btn"
+            type="button"
+            class="dialog-close"
+            aria-label="Close object inspector"
+          >
+            ✕
+          </button>
+        </header>
+
+        <div id="inspect-tour-banner" class="inspect-tour-banner" hidden>
+          <div class="inspect-tour-top">
+            <span id="inspect-tour-step" class="inspect-tour-step mono">TOUR 1/10</span>
+            <div class="inspect-tour-nav">
+              <button id="inspect-tour-prev" type="button" class="chip-btn">Prev</button>
+              <button id="inspect-tour-next" type="button" class="chip-btn">Next</button>
+            </div>
+          </div>
+          <p id="inspect-tour-note" class="inspect-tour-note"></p>
+        </div>
+
+        <dl class="inspect-grid">
+          <div class="inspect-cell">
+            <dt>ALT / AZ</dt>
+            <dd id="inspect-altaz" class="mono">—</dd>
+          </div>
+          <div class="inspect-cell">
+            <dt>RA / DEC (J2000)</dt>
+            <dd id="inspect-radec" class="mono">—</dd>
+          </div>
+          <div class="inspect-cell">
+            <dt>VISUAL MAG</dt>
+            <dd id="inspect-mag" class="mono">—</dd>
+          </div>
+          <div class="inspect-cell">
+            <dt>DISTANCE</dt>
+            <dd id="inspect-dist" class="mono">—</dd>
+          </div>
+          <div class="inspect-cell inspect-cell-wide">
+            <dt>CLASS / TYPE</dt>
+            <dd id="inspect-spectral">—</dd>
+          </div>
+          <div class="inspect-cell">
+            <dt>RISE</dt>
+            <dd id="inspect-rise" class="mono">—</dd>
+          </div>
+          <div class="inspect-cell">
+            <dt>TRANSIT</dt>
+            <dd id="inspect-transit" class="mono">—</dd>
+          </div>
+          <div class="inspect-cell">
+            <dt>SET</dt>
+            <dd id="inspect-set" class="mono">—</dd>
+          </div>
+          <div class="inspect-cell">
+            <dt>AIRMASS</dt>
+            <dd id="inspect-airmass" class="mono">—</dd>
+          </div>
+        </dl>
+
+        <p id="inspect-description" class="inspect-description"></p>
+
+        <div class="inspect-actions">
+          <button id="inspect-center-btn" type="button" class="primary-btn">Center &amp; Track</button>
+          <button id="inspect-zoom-btn" type="button" class="secondary-btn">Telephoto 18°</button>
+        </div>
+      </aside>
+
+      <!-- Bottom Control Dock & Time Machine Bar -->
+      <footer class="hud-bottom">
+        <section class="hud-panel time-machine-bar" aria-label="Time Machine">
+          <div class="time-transport-group">
+            <button id="time-play-pause-btn" type="button" class="chip-btn is-active" aria-label="Pause simulation" title="Play or pause sky simulation">
+              Pause
+            </button>
+            <button id="time-now-btn" type="button" class="chip-btn" title="Reset simulation clock to current live time">
+              Now
+            </button>
+          </div>
+
+          <div class="time-scrub-group">
+            <label for="time-scrub-slider" class="sr-only">Scrub local time of day</label>
+            <input
+              id="time-scrub-slider"
+              type="range"
+              class="time-scrub-slider"
+              min="0"
+              max="1439"
+              step="1"
+              value="720"
+            />
+            <span id="time-scrub-readout" class="time-scrub-readout mono">12:00</span>
+          </div>
+
+          <div class="time-warp-group" role="group" aria-label="Time warp speed multiplier">
+            <button type="button" class="chip-btn warp-btn" data-time-warp="-3600">−3600×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="-300">−300×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="-60">−60×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="-1">−1×</button>
+            <button type="button" class="chip-btn warp-btn is-active" data-time-warp="1">1×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="60">60×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="300">300×</button>
+            <button type="button" class="chip-btn warp-btn" data-time-warp="3600">3600×</button>
+          </div>
+
+          <div class="time-picker-group">
+            <label for="time-datetime-input" class="sr-only">Simulation date and time</label>
+            <input id="time-datetime-input" type="datetime-local" class="datetime-input mono" />
+          </div>
+        </section>
+
+        <div class="hud-bottom-row">
+          <div class="hud-panel look-panel">
+            <div class="look-readout">
+              <span><abbr title="Azimuth">AZ</abbr> <strong id="az-readout" class="mono">180.0° S</strong></span>
+              <span><abbr title="Altitude">ALT</abbr> <strong id="alt-readout" class="mono">+32.0°</strong></span>
+              <span><abbr title="Field of View">FOV</abbr> <strong id="fov-readout" class="mono">72°</strong></span>
+            </div>
+            <div class="zoom-controls" role="group" aria-label="Field of view zoom">
+              <button id="zoom-in-btn" type="button" class="icon-btn" title="Zoom in (narrow FOV)" aria-label="Zoom in">+</button>
+              <button id="zoom-out-btn" type="button" class="icon-btn" title="Zoom out (wide FOV)" aria-label="Zoom out">−</button>
+            </div>
+          </div>
+
+          <nav class="hud-panel compass-nav" aria-label="Quick sky orientation">
+            <button type="button" class="chip-btn" data-look-az="0" data-look-alt="25">N</button>
+            <button type="button" class="chip-btn" data-look-az="90" data-look-alt="25">E</button>
+            <button type="button" class="chip-btn" data-look-az="180" data-look-alt="25">S</button>
+            <button type="button" class="chip-btn" data-look-az="270" data-look-alt="25">W</button>
+            <button type="button" class="chip-btn" data-look-az="180" data-look-alt="89">Zenith</button>
+          </nav>
+
+          <div class="hud-panel layers-panel" role="group" aria-label="Celestial display layers">
+            <button type="button" class="chip-btn is-active" data-layer="planets" aria-pressed="true">Planets</button>
+            <button type="button" class="chip-btn is-active" data-layer="dso" aria-pressed="true">Deep Sky</button>
+            <button type="button" class="chip-btn is-active" data-layer="constellations" aria-pressed="true">Constellations</button>
+            <button type="button" class="chip-btn" data-layer="boundaries" aria-pressed="false">Boundaries</button>
+            <button type="button" class="chip-btn is-active" data-layer="labels" aria-pressed="true">Labels</button>
+            <button type="button" class="chip-btn is-active" data-layer="atmosphere" aria-pressed="true">Atmosphere</button>
+            <button type="button" class="chip-btn is-active" data-layer="horizon" aria-pressed="true">Horizon</button>
+          </div>
         </div>
       </footer>
     </div>
@@ -175,6 +357,47 @@
             <button type="submit" class="primary-btn">Apply Coordinates</button>
           </div>
         </form>
+      </div>
+    </dialog>
+
+    <!-- Native Modal Catalog Search Palette (Cmd/Ctrl+K) -->
+    <dialog id="search-dialog" closedby="any" aria-labelledby="search-dialog-title">
+      <div class="dialog-shell">
+        <header class="dialog-header">
+          <div>
+            <h2 id="search-dialog-title">Search Celestial Catalog</h2>
+            <p class="dialog-subtitle">Fly smoothly to any planet, bright star, Messier/Caldwell object, or constellation.</p>
+          </div>
+          <button
+            type="button"
+            class="dialog-close"
+            command="close"
+            commandfor="search-dialog"
+            aria-label="Close catalog search"
+          >
+            ✕
+          </button>
+        </header>
+
+        <search class="dialog-section" aria-label="Search stars, planets, deep sky objects, and constellations">
+          <label for="celestial-search-input" class="sr-only">Search by name, designation, or catalog ID</label>
+          <input
+            id="celestial-search-input"
+            type="search"
+            class="text-input"
+            placeholder="Search Sirius, Saturn, M31, Orion, Pleiades, HIP 32349…"
+            autocomplete="off"
+            autofocus
+          />
+          <div class="search-filter-row" role="group" aria-label="Filter catalog results by object category">
+            <button type="button" class="chip-btn is-active" data-search-filter="all" aria-pressed="true">All</button>
+            <button type="button" class="chip-btn" data-search-filter="planet" aria-pressed="false">Planets</button>
+            <button type="button" class="chip-btn" data-search-filter="star" aria-pressed="false">Stars</button>
+            <button type="button" class="chip-btn" data-search-filter="dso" aria-pressed="false">Deep Sky</button>
+            <button type="button" class="chip-btn" data-search-filter="constellation" aria-pressed="false">Constellations</button>
+          </div>
+          <ul id="celestial-search-results" class="preset-list search-results-list" role="listbox" aria-label="Matching celestial objects"></ul>
+        </search>
       </div>
     </dialog>
 

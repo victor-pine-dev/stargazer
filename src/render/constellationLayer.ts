@@ -11,7 +11,7 @@ export interface ScreenLabelItem {
   id: string;
   text: string;
   subtext?: string;
-  kind: 'constellation' | 'star' | 'compass';
+  kind: 'constellation' | 'star' | 'compass' | 'planet' | 'dso';
   x: number;
   y: number;
   priority: number;

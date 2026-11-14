@@ -38,6 +38,9 @@ async function bootstrap(): Promise<void> {
       onTelemetry: (snapshot) => {
         hud?.updateTelemetry(snapshot);
       },
+      onSelectObject: (telemetry) => {
+        hud?.updateSelectedObject(telemetry);
+      },
     });
 
     hud = new HudController(engine, initialLocation);
