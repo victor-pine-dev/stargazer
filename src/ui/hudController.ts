@@ -890,11 +890,12 @@ export class HudController {
     // Calm / Relax Mode (Campfire, Music & Meteors)
     const setCalmModeActive = (enable: boolean) => {
       if (enable) {
+        const audioPromise = this.calmAudio.start();
         this.setActiveDrawer(null);
         const snap = this.engine.toggleCalmMode(true);
         this.syncCalmModeUi(snap);
         this.syncLayerToggleButtons();
-        void this.calmAudio.start().then((audioState) => {
+        void audioPromise.then((audioState) => {
           this.syncCalmAudioUi(audioState);
         });
       } else {

@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 // @ts-expect-error jsdom does not ship TypeScript declarations in devDependencies
 import { JSDOM } from 'jsdom';
 import * as THREE from 'three';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parseStarBinary, type ConstellationRecord, type DsoRecord, type NamedStarEntry } from '../../data/catalogLoader';
 import {
   altAzToWorldVector,
@@ -1115,6 +1115,122 @@ describe('Phase 7 Calm Mode: Meteor Physics & Soundscape State', () => {
 
     expect(audio.stop().isPlaying).toBe(false);
     audio.dispose();
+  });
+
+  it('unlocks interrupted iOS WebKit AudioContext and playback session synchronously on start()', async () => {
+    const origWindowDesc = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    const origNavigatorDesc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    const audioSession = { type: 'ambient' };
+    const startCalls: number[] = [];
+
+    const mockCtx: Record<string, unknown> = {
+      state: 'interrupted',
+      sampleRate: 44100,
+      currentTime: 2.0,
+      destination: {},
+      onstatechange: null as (() => void) | null,
+    };
+
+    const resumeSpy = vi.fn(() => {
+      mockCtx.state = 'running';
+      const handler = mockCtx.onstatechange as (() => void) | null;
+      handler?.();
+      return Promise.resolve();
+    });
+    const closeSpy = vi.fn(() => Promise.resolve());
+    const createGainSpy = vi.fn(() => ({
+      gain: {
+        value: 0,
+        setValueAtTime: vi.fn(),
+        linearRampToValueAtTime: vi.fn(),
+        exponentialRampToValueAtTime: vi.fn(),
+        setTargetAtTime: vi.fn(),
+      },
+      connect: vi.fn(),
+    }));
+    const createBufferSourceSpy = vi.fn(() => ({
+      buffer: null,
+      loop: false,
+      connect: vi.fn(),
+      start: vi.fn((when?: number) => {
+        if (typeof when === 'number') {
+          startCalls.push(when);
+        }
+      }),
+      stop: vi.fn(),
+    }));
+
+    mockCtx.resume = resumeSpy;
+    mockCtx.close = closeSpy;
+    mockCtx.createGain = createGainSpy;
+    mockCtx.createBufferSource = createBufferSourceSpy;
+    mockCtx.createBuffer = vi.fn((_ch: number, len: number) => ({
+      getChannelData: () => new Float32Array(len),
+    }));
+    mockCtx.createBiquadFilter = vi.fn(() => ({
+      type: 'lowpass',
+      frequency: { value: 0 },
+      Q: { value: 1 },
+      connect: vi.fn(),
+    }));
+    mockCtx.createOscillator = vi.fn(() => ({
+      type: 'sine',
+      frequency: {
+        value: 440,
+        setValueAtTime: vi.fn(),
+        exponentialRampToValueAtTime: vi.fn(),
+      },
+      connect: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    }));
+    mockCtx.createStereoPanner = vi.fn(() => ({
+      pan: { value: 0 },
+      connect: vi.fn(),
+    }));
+
+    const removeEventListenerSpy = vi.fn();
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: {
+        AudioContext: function MockAudioContext() {
+          return mockCtx;
+        },
+        setInterval: vi.fn(() => 42),
+        clearInterval: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: removeEventListenerSpy,
+      },
+    });
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { audioSession },
+    });
+
+    const audio = new CalmAudioController();
+    try {
+      const startPromise = audio.start();
+      // Must unlock playback session and invoke ctx.resume() synchronously within the tap handler
+      expect(audioSession.type).toBe('playback');
+      expect(resumeSpy).toHaveBeenCalledTimes(1);
+
+      const started = await startPromise;
+      expect(started.isPlaying).toBe(true);
+      expect(createGainSpy.mock.calls.length).toBeGreaterThanOrEqual(5);
+      expect(createBufferSourceSpy.mock.calls.length).toBeGreaterThanOrEqual(3);
+      // 1-frame unlock uses 0; all scheduled sources must not fall in the past relative to currentTime
+      expect(startCalls.every((when) => when === 0 || when >= 2.0)).toBe(true);
+
+      audio.dispose();
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      expect(removeEventListenerSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      audio.dispose();
+      if (origWindowDesc) Object.defineProperty(globalThis, 'window', origWindowDesc);
+      else Reflect.deleteProperty(globalThis, 'window');
+      if (origNavigatorDesc) Object.defineProperty(globalThis, 'navigator', origNavigatorDesc);
+      else Reflect.deleteProperty(globalThis, 'navigator');
+    }
   });
 });
 
