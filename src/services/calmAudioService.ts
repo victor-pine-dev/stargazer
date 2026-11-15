@@ -85,19 +85,17 @@ export class CalmAudioController {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
   private fireGain: GainNode | null = null;
-  private breezeGain: GainNode | null = null;
   private nightGain: GainNode | null = null;
   private birdsGain: GainNode | null = null;
 
   private fireLoopSource: AudioBufferSourceNode | null = null;
-  private breezeLoopSource: AudioBufferSourceNode | null = null;
   private noiseBurstBuffer: AudioBuffer | null = null;
   private keepAliveAudio: HTMLAudioElement | null = null;
   private schedulerId: number | null = null;
   private gestureUnlockBound = false;
 
   private nextFireAt = 0;
-  private nextSapAt = 0;
+  private nextClusterAt = 0;
   private nextCricketAt = 0;
   private nextFrogAt = 0;
   private nextOwlAt = 0;
@@ -268,13 +266,7 @@ export class CalmAudioController {
     } catch {
       // Node may already be stopped.
     }
-    try {
-      this.breezeLoopSource?.stop();
-    } catch {
-      // Node may already be stopped.
-    }
     this.fireLoopSource = null;
-    this.breezeLoopSource = null;
     this.noiseBurstBuffer = null;
 
     if (this.ctx) {
@@ -291,7 +283,6 @@ export class CalmAudioController {
     this.ctx = null;
     this.masterGain = null;
     this.fireGain = null;
-    this.breezeGain = null;
     this.nightGain = null;
     this.birdsGain = null;
   }
@@ -404,11 +395,6 @@ export class CalmAudioController {
     fireGain.connect(masterGain);
     this.fireGain = fireGain;
 
-    const breezeGain = ctx.createGain();
-    breezeGain.gain.value = 0;
-    breezeGain.connect(masterGain);
-    this.breezeGain = breezeGain;
-
     const nightGain = ctx.createGain();
     nightGain.gain.value = 0;
     nightGain.connect(masterGain);
@@ -420,79 +406,79 @@ export class CalmAudioController {
     this.birdsGain = birdsGain;
 
     this.noiseBurstBuffer = this.buildNoiseBurstBuffer(ctx);
-    this.startAmbientLoops(ctx, fireGain, breezeGain);
+    this.startAmbientLoops(ctx, fireGain);
   }
 
-  private startAmbientLoops(
-    ctx: AudioContext,
-    fireGain: GainNode,
-    breezeGain: GainNode
-  ): void {
+  private startAmbientLoops(ctx: AudioContext, fireGain: GainNode): void {
     const sampleRate = Math.max(8000, ctx.sampleRate || 44100);
     const frameCount = Math.floor(sampleRate * AMBIENT_LOOP_SECONDS);
-    const fadeFrames = Math.floor(sampleRate * 0.25);
+    const fadeFrames = Math.floor(sampleRate * 0.2);
     const totalFrames = frameCount + fadeFrames;
 
-    const rawFire = new Float32Array(totalFrames);
-    const rawBreeze = new Float32Array(totalFrames);
-
-    // Sample-rate invariant 1-pole filters tuned for phone-speaker presence (180-2600 Hz).
-    const a650 = Math.exp((-2 * Math.PI * 650) / sampleRate);
-    const a160 = Math.exp((-2 * Math.PI * 160) / sampleRate);
-    const a700 = Math.exp((-2 * Math.PI * 700) / sampleRate);
-    const aBreezeLp = Math.exp((-2 * Math.PI * 520) / sampleRate);
-    const aBreezeAir = Math.exp((-2 * Math.PI * 1100) / sampleRate);
-
-    let lp650 = 0;
-    let lp160 = 0;
-    let lp700 = 0;
-    let crackleEnv = 0;
-    let breezeLp = 0;
-    let breezeAir = 0;
-
+    // Very soft <140 Hz low draft murmur only (<= 0.035 amplitude, zero mid/high noise hiss).
+    const rawDraft = new Float32Array(totalFrames);
+    const a130 = Math.exp((-2 * Math.PI * 130) / sampleRate);
+    let lp1 = 0;
+    let lp2 = 0;
     for (let i = 0; i < totalFrames; i += 1) {
       const white = Math.random() * 2 - 1;
-      lp650 = lp650 * a650 + white * (1 - a650);
-      lp160 = lp160 * a160 + white * (1 - a160);
-      const flameRoar = (lp650 - lp160) * 2.85 + lp160 * 0.45;
-
-      if (Math.random() < 0.0055) {
-        crackleEnv = 0.28 + Math.random() * 0.42;
-      } else {
-        crackleEnv *= 0.968;
-      }
-      const crackleWhite = white * crackleEnv;
-      lp700 = lp700 * a700 + crackleWhite * (1 - a700);
-      const emberBed = crackleWhite - lp700;
-
-      rawFire[i] = Math.max(-0.92, Math.min(0.92, flameRoar + emberBed * 0.72));
-
-      const windWhite = Math.random() * 2 - 1;
-      breezeLp = breezeLp * aBreezeLp + windWhite * (1 - aBreezeLp);
-      breezeAir = breezeAir * aBreezeAir + windWhite * (1 - aBreezeAir);
-      const cycle = (2 * Math.PI * (i % frameCount)) / frameCount;
-      const swell = 0.62 + 0.38 * Math.sin(cycle) * Math.sin(cycle * 0.5 + 0.7);
-      rawBreeze[i] = Math.max(
-        -0.85,
-        Math.min(0.85, ((breezeLp - breezeAir * 0.35) * 1.45 + breezeAir * 0.35) * swell)
-      );
+      lp1 = lp1 * a130 + white * (1 - a130);
+      lp2 = lp2 * a130 + lp1 * (1 - a130);
+      rawDraft[i] = Math.max(-0.035, Math.min(0.035, lp2 * 0.16));
     }
 
     const fireBuffer = ctx.createBuffer(1, frameCount, sampleRate);
-    const breezeBuffer = ctx.createBuffer(1, frameCount, sampleRate);
     const outFire = fireBuffer.getChannelData(0);
-    const outBreeze = breezeBuffer.getChannelData(0);
 
-    // Crossfade the extra tail back into the loop start so wraps never click.
+    // Crossfade the sub-140 Hz air draft seamlessly over the 6s boundary.
     for (let i = 0; i < frameCount; i += 1) {
       if (i < fadeFrames) {
         const blend = i / fadeFrames;
-        outFire[i] = rawFire[i]! * blend + rawFire[frameCount + i]! * (1 - blend);
-        outBreeze[i] = rawBreeze[i]! * blend + rawBreeze[frameCount + i]! * (1 - blend);
+        outFire[i] = rawDraft[i]! * blend + rawDraft[frameCount + i]! * (1 - blend);
       } else {
-        outFire[i] = rawFire[i]!;
-        outBreeze[i] = rawBreeze[i]!;
+        outFire[i] = rawDraft[i]!;
       }
+    }
+
+    // Scatter discrete, clustered dry charcoal/wood micro-crackles across quiet gaps.
+    const spikeSamples = Math.max(2, Math.floor(0.0004 * sampleRate));
+    let cursor = Math.floor((0.02 + Math.random() * 0.04) * sampleRate);
+    let clusterRemaining = 2 + Math.floor(Math.random() * 5);
+
+    while (cursor < frameCount) {
+      const impulseSamples = Math.max(
+        8,
+        Math.floor((0.0006 + Math.random() * 0.0026) * sampleRate)
+      );
+      const fHigh = 2200 + Math.random() * 3400;
+      const tauHigh = 0.0005 + Math.random() * 0.0009;
+      const fLow = 550 + Math.random() * 900;
+      const tauLow = 0.001 + Math.random() * 0.0018;
+      const amp = 0.16 + Math.random() * 0.44;
+      const sign = Math.random() < 0.5 ? 1 : -1;
+
+      for (let k = 0; k < impulseSamples; k += 1) {
+        const t = k / sampleRate;
+        const spike = k < spikeSamples ? (1 - k / spikeSamples) * (Math.random() * 2 - 1) * 0.45 : 0;
+        const hi = Math.sin(2 * Math.PI * fHigh * t) * Math.exp(-t / tauHigh) * 0.58;
+        const lo = Math.sin(2 * Math.PI * fLow * t) * Math.exp(-t / tauLow) * 0.42;
+        const idx = (cursor + k) % frameCount;
+        outFire[idx] = (outFire[idx] ?? 0) + sign * amp * (spike + hi + lo);
+      }
+
+      clusterRemaining -= 1;
+      if (clusterRemaining <= 0) {
+        clusterRemaining = 2 + Math.floor(Math.random() * 5);
+        cursor += Math.floor((0.055 + Math.random() * 0.13) * sampleRate);
+      } else {
+        cursor += Math.floor((0.01 + Math.random() * 0.032) * sampleRate);
+      }
+    }
+
+    for (let i = 0; i < frameCount; i += 1) {
+      const sample = outFire[i] ?? 0;
+      if (sample > 0.92) outFire[i] = 0.92;
+      else if (sample < -0.92) outFire[i] = -0.92;
     }
 
     const fireSource = ctx.createBufferSource();
@@ -501,25 +487,12 @@ export class CalmAudioController {
 
     const hearthFilter = ctx.createBiquadFilter();
     hearthFilter.type = 'lowpass';
-    hearthFilter.frequency.value = 2600;
+    hearthFilter.frequency.value = 4800;
     fireSource.connect(hearthFilter);
     hearthFilter.connect(fireGain);
 
-    const breezeSource = ctx.createBufferSource();
-    breezeSource.buffer = breezeBuffer;
-    breezeSource.loop = true;
-
-    const breezeFilter = ctx.createBiquadFilter();
-    breezeFilter.type = 'bandpass';
-    breezeFilter.frequency.value = 480;
-    breezeFilter.Q.value = 0.7;
-    breezeSource.connect(breezeFilter);
-    breezeFilter.connect(breezeGain);
-
     fireSource.start();
-    breezeSource.start();
     this.fireLoopSource = fireSource;
-    this.breezeLoopSource = breezeSource;
   }
 
   private buildNoiseBurstBuffer(ctx: AudioContext): AudioBuffer {
@@ -554,7 +527,6 @@ export class CalmAudioController {
       !this.ctx ||
       !this.masterGain ||
       !this.fireGain ||
-      !this.breezeGain ||
       !this.nightGain ||
       !this.birdsGain
     ) {
@@ -571,21 +543,19 @@ export class CalmAudioController {
     const hasNight = this.preset === 'fire-night' || this.preset === 'night-only';
     const hasBirds = this.preset === 'fire-birds' || this.preset === 'birds-only';
 
-    const fireLevel = hasFire ? 0.92 : 0;
-    const breezeLevel = hasNight || hasBirds ? 0.36 : 0.14;
+    const fireLevel = hasFire ? 0.75 : 0;
     const nightLevel = hasNight ? 0.9 : 0;
     const birdsLevel = hasBirds ? 0.9 : 0;
 
     this.masterGain.gain.setTargetAtTime(effectiveMaster, now, 0.12);
     this.fireGain.gain.setTargetAtTime(fireLevel, now, FADE_SECONDS);
-    this.breezeGain.gain.setTargetAtTime(breezeLevel, now, FADE_SECONDS);
     this.nightGain.gain.setTargetAtTime(nightLevel, now, FADE_SECONDS);
     this.birdsGain.gain.setTargetAtTime(birdsLevel, now, FADE_SECONDS);
   }
 
   private resetScheduleHorizons(now: number): void {
     this.nextFireAt = now + 0.02 + Math.random() * 0.08;
-    this.nextSapAt = now + 0.55 + Math.random() * 0.9;
+    this.nextClusterAt = now + 0.5 + Math.random() * 0.9;
     this.nextCricketAt = now + 0.08 + Math.random() * 0.22;
     this.nextFrogAt = now + 1.8 + Math.random() * 2.2;
     this.nextOwlAt = now + 4.2 + Math.random() * 4.5;
@@ -621,7 +591,7 @@ export class CalmAudioController {
     const horizon = now + 0.32;
 
     if (this.nextFireAt < now) this.nextFireAt = now + 0.015;
-    if (this.nextSapAt < now) this.nextSapAt = now + 0.12;
+    if (this.nextClusterAt < now) this.nextClusterAt = now + 0.12;
     if (this.nextCricketAt < now) this.nextCricketAt = now + 0.08;
     if (this.nextFrogAt < now) this.nextFrogAt = now + 0.2;
     if (this.nextOwlAt < now) this.nextOwlAt = now + 0.4;
@@ -637,15 +607,15 @@ export class CalmAudioController {
     if (hasFire) {
       while (this.nextFireAt < horizon) {
         this.triggerFireSnap(this.nextFireAt);
-        if (Math.random() < 0.36) {
-          this.triggerFireSnap(this.nextFireAt + 0.018 + Math.random() * 0.036, 0.78);
+        if (Math.random() < 0.38) {
+          this.triggerFireSnap(this.nextFireAt + 0.018 + Math.random() * 0.034, 0.78);
         }
-        this.nextFireAt += 0.14 + Math.random() * 0.48;
+        this.nextFireAt += 0.16 + Math.random() * 0.44;
       }
 
-      if (this.nextSapAt < horizon) {
-        this.triggerSapSizzle(this.nextSapAt);
-        this.nextSapAt = Math.max(horizon, this.nextSapAt) + 1.6 + Math.random() * 3.0;
+      if (this.nextClusterAt < horizon) {
+        this.triggerCrackleCluster(this.nextClusterAt);
+        this.nextClusterAt = Math.max(horizon, this.nextClusterAt) + 1.1 + Math.random() * 2.3;
       }
     }
 
@@ -695,55 +665,63 @@ export class CalmAudioController {
     if (!this.ctx || !this.fireGain || !this.noiseBurstBuffer) return;
 
     const startAt = Math.max(this.ctx.currentTime + 0.012, at);
+    const pan = (Math.random() - 0.5) * 0.45;
+
+    // 1. Crisp fracture click (3.5-7.5 ms) — short high-Q snap without sustained static hiss.
     const src = this.ctx.createBufferSource();
     src.buffer = this.noiseBurstBuffer;
 
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.value = 850 + Math.random() * 2050;
-    filter.Q.value = 1.4 + Math.random() * 1.2;
+    filter.frequency.value = 1800 + Math.random() * 2800;
+    filter.Q.value = 4.5 + Math.random() * 3.5;
 
-    const gain = this.ctx.createGain();
-    const peak = (0.38 + Math.random() * 0.3) * amplitudeScale;
-    const decay = 0.022 + Math.random() * 0.026;
+    const clickGain = this.ctx.createGain();
+    const peak = (0.42 + Math.random() * 0.33) * amplitudeScale;
+    const decay = 0.0035 + Math.random() * 0.004;
 
-    gain.gain.setValueAtTime(0.0001, startAt);
-    gain.gain.linearRampToValueAtTime(peak, startAt + 0.0025);
-    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + decay);
+    clickGain.gain.setValueAtTime(0.0001, startAt);
+    clickGain.gain.linearRampToValueAtTime(peak, startAt + 0.0008);
+    clickGain.gain.exponentialRampToValueAtTime(0.0001, startAt + decay);
 
     src.connect(filter);
-    filter.connect(gain);
-    this.connectWithPan(gain, this.fireGain, (Math.random() - 0.5) * 0.45);
+    filter.connect(clickGain);
+    this.connectWithPan(clickGain, this.fireGain, pan);
 
-    const offset = Math.random() * Math.max(0.05, NOISE_BURST_SECONDS - 0.1);
-    src.start(startAt, offset, decay + 0.02);
+    const offset = Math.random() * Math.max(0.05, NOISE_BURST_SECONDS - 0.06);
+    src.start(startAt, offset, decay + 0.01);
+
+    // 2. Hollow dry-wood pop (9-16 ms) giving physical firewood "tok/pop" body.
+    const popOsc = this.ctx.createOscillator();
+    popOsc.type = 'triangle';
+    const popDur = 0.009 + Math.random() * 0.007;
+    const popStartHz = 380 + Math.random() * 380;
+    const popEndHz = 130 + Math.random() * 110;
+    popOsc.frequency.setValueAtTime(popStartHz, startAt);
+    popOsc.frequency.exponentialRampToValueAtTime(popEndHz, startAt + popDur);
+
+    const popGain = this.ctx.createGain();
+    const popPeak = (0.22 + Math.random() * 0.16) * amplitudeScale;
+    popGain.gain.setValueAtTime(0.0001, startAt);
+    popGain.gain.linearRampToValueAtTime(popPeak, startAt + 0.0012);
+    popGain.gain.exponentialRampToValueAtTime(0.0001, startAt + popDur);
+
+    popOsc.connect(popGain);
+    this.connectWithPan(popGain, this.fireGain, pan);
+    popOsc.start(startAt);
+    popOsc.stop(startAt + popDur + 0.01);
   }
 
-  private triggerSapSizzle(at: number): void {
-    if (!this.ctx || !this.fireGain || !this.noiseBurstBuffer) return;
+  private triggerCrackleCluster(at: number): void {
+    if (!this.ctx || !this.fireGain) return;
 
-    const startAt = Math.max(this.ctx.currentTime + 0.012, at);
-    const src = this.ctx.createBufferSource();
-    src.buffer = this.noiseBurstBuffer;
-
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'highpass';
-    filter.frequency.value = 1900 + Math.random() * 1300;
-
-    const gain = this.ctx.createGain();
-    const duration = 0.1 + Math.random() * 0.08;
-    const peak = 0.16 + Math.random() * 0.1;
-
-    gain.gain.setValueAtTime(0.0001, startAt);
-    gain.gain.linearRampToValueAtTime(peak, startAt + 0.016);
-    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
-
-    src.connect(filter);
-    filter.connect(gain);
-    this.connectWithPan(gain, this.fireGain, (Math.random() - 0.5) * 0.35);
-
-    const offset = Math.random() * Math.max(0.05, NOISE_BURST_SECONDS - duration - 0.04);
-    src.start(startAt, offset, duration + 0.02);
+    const count = 4 + Math.floor(Math.random() * 5);
+    let cursor = Math.max(this.ctx.currentTime + 0.012, at);
+    for (let i = 0; i < count; i += 1) {
+      const scale = 0.35 + Math.random() * 0.6;
+      this.triggerFireSnap(cursor, scale);
+      cursor += 0.014 + Math.random() * 0.024;
+    }
   }
 
   private triggerCricketChirp(at: number): void {
