@@ -54,7 +54,13 @@ import {
   slerpUnitVectors,
   spawnMeteorTrajectory,
 } from '../meteors';
-import { CalmAudioController } from '../../services/calmAudioService';
+import {
+  buildSoftLimiterCurve,
+  CalmAudioController,
+  synthesizeCrackleSamples,
+  synthesizeFlameBedSamples,
+  synthesizeWoodPopSamples,
+} from '../../services/calmAudioService';
 
 describe('Astronomical Coordinate & Sidereal Math', () => {
   it('converts RA/Dec to orthonormal J2000 unit vectors', () => {
@@ -1230,6 +1236,218 @@ describe('Phase 7 Calm Mode: Meteor Physics & Soundscape State', () => {
       else Reflect.deleteProperty(globalThis, 'window');
       if (origNavigatorDesc) Object.defineProperty(globalThis, 'navigator', origNavigatorDesc);
       else Reflect.deleteProperty(globalThis, 'navigator');
+    }
+  });
+  it('synthesizes distortion-free campfire bed, crackle, wood-pop, and soft-limiter DSP buffers', () => {
+    const computeMetrics = (samples: Float32Array) => {
+      let sum = 0;
+      let sumSq = 0;
+      let peak = 0;
+      let maxJump = 0;
+      for (let i = 0; i < samples.length; i += 1) {
+        const val = samples[i]!;
+        expect(Number.isFinite(val)).toBe(true);
+        sum += val;
+        sumSq += val * val;
+        peak = Math.max(peak, Math.abs(val));
+        if (i > 0) {
+          maxJump = Math.max(maxJump, Math.abs(val - samples[i - 1]!));
+        }
+      }
+      return {
+        mean: sum / samples.length,
+        rms: Math.sqrt(sumSq / samples.length),
+        peak,
+        maxJump,
+      };
+    };
+
+    for (const sr of [48000, 16000]) {
+      const bed = synthesizeFlameBedSamples(sr);
+      const bedMetrics = computeMetrics(bed);
+      expect(Math.abs(bedMetrics.mean)).toBeLessThan(0.002);
+      expect(bedMetrics.rms).toBeGreaterThanOrEqual(0.04);
+      expect(bedMetrics.rms).toBeLessThanOrEqual(0.11);
+      expect(bedMetrics.peak).toBeLessThanOrEqual(0.3);
+      expect(Math.abs(bed[0]! - bed[bed.length - 1]!)).toBeLessThan(0.04);
+
+      for (let i = 0; i < 12; i += 1) {
+        const crackle = synthesizeCrackleSamples(sr, i);
+        const m = computeMetrics(crackle);
+        expect(crackle[0]).toBe(0);
+        expect(crackle[crackle.length - 1]).toBe(0);
+        expect(Math.abs(m.mean)).toBeLessThan(0.003);
+        expect(m.peak).toBeLessThanOrEqual(0.66);
+        if (sr === 48000) {
+          expect(m.maxJump).toBeLessThan(0.42);
+        }
+      }
+
+      for (let i = 0; i < 6; i += 1) {
+        const pop = synthesizeWoodPopSamples(sr, i);
+        const m = computeMetrics(pop);
+        expect(pop[0]).toBe(0);
+        expect(pop[pop.length - 1]).toBe(0);
+        expect(Math.abs(m.mean)).toBeLessThan(0.003);
+        expect(m.peak).toBeLessThanOrEqual(0.66);
+        if (sr === 48000) {
+          expect(m.maxJump).toBeLessThan(0.42);
+        }
+      }
+    }
+
+    const curve = buildSoftLimiterCurve();
+    const mid = Math.floor(curve.length / 2);
+    expect(curve[mid]).toBeCloseTo(0, 6);
+    for (let i = 0; i < curve.length; i += 1) {
+      const x = (i / (curve.length - 1)) * 2 - 1;
+      const y = curve[i]!;
+      expect(Math.abs(y)).toBeLessThanOrEqual(0.96);
+      if (Math.abs(x) <= 0.7) {
+        expect(y).toBeCloseTo(x, 6);
+      }
+      if (i > 0) {
+        expect(y).toBeGreaterThanOrEqual(curve[i - 1]!);
+      }
+    }
+  });
+
+  it('wires master limiter/compressor, disconnects ended voices, and avoids slider unlock spam', async () => {
+    const origWindowDesc = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    const createdSources: Array<{ onended: (() => void) | null; loop: boolean }> = [];
+    const voiceDisconnectSpies: Array<ReturnType<typeof vi.fn>> = [];
+    const limiterConnectSpy = vi.fn();
+    const compressorConnectSpy = vi.fn();
+
+    const mockCompressor = {
+      threshold: { value: 0 },
+      knee: { value: 0 },
+      ratio: { value: 0 },
+      attack: { value: 0 },
+      release: { value: 0 },
+      connect: compressorConnectSpy,
+      disconnect: vi.fn(),
+    };
+    const mockWaveShaper = {
+      curve: null as Float32Array | null,
+      oversample: 'none',
+      connect: limiterConnectSpy,
+      disconnect: vi.fn(),
+    };
+
+    const resumeSpy = vi.fn(() => Promise.resolve());
+    const createBufferSourceSpy = vi.fn(() => {
+      const disconnectSpy = vi.fn();
+      voiceDisconnectSpies.push(disconnectSpy);
+      const node = {
+        buffer: null,
+        loop: false,
+        playbackRate: { value: 1 },
+        onended: null as (() => void) | null,
+        connect: vi.fn(),
+        disconnect: disconnectSpy,
+        start: vi.fn(),
+        stop: vi.fn(),
+      };
+      createdSources.push(node);
+      return node;
+    });
+
+    const mockCtx: Record<string, unknown> = {
+      state: 'running',
+      sampleRate: 48000,
+      currentTime: 5.0,
+      destination: { kind: 'destination' },
+      onstatechange: null,
+      resume: resumeSpy,
+      close: vi.fn(() => Promise.resolve()),
+      createDynamicsCompressor: vi.fn(() => mockCompressor),
+      createWaveShaper: vi.fn(() => mockWaveShaper),
+      createGain: vi.fn(() => {
+        const disconnectSpy = vi.fn();
+        voiceDisconnectSpies.push(disconnectSpy);
+        return {
+          gain: {
+            value: 1,
+            setValueAtTime: vi.fn(),
+            linearRampToValueAtTime: vi.fn(),
+            exponentialRampToValueAtTime: vi.fn(),
+            setTargetAtTime: vi.fn(),
+          },
+          connect: vi.fn(),
+          disconnect: disconnectSpy,
+        };
+      }),
+      createBufferSource: createBufferSourceSpy,
+      createBuffer: vi.fn((_ch: number, len: number) => ({
+        getChannelData: () => new Float32Array(len),
+      })),
+      createBiquadFilter: vi.fn(() => ({
+        type: 'lowpass',
+        frequency: { value: 0 },
+        Q: { value: 1 },
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      })),
+      createOscillator: vi.fn(() => ({
+        type: 'sine',
+        frequency: {
+          value: 440,
+          setValueAtTime: vi.fn(),
+          exponentialRampToValueAtTime: vi.fn(),
+        },
+        onended: null,
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        start: vi.fn(),
+        stop: vi.fn(),
+      })),
+      createStereoPanner: vi.fn(() => ({
+        pan: { value: 0 },
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      })),
+    };
+
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: {
+        AudioContext: function MockAudioContext() {
+          return mockCtx;
+        },
+        setInterval: vi.fn(() => 7),
+        clearInterval: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      },
+    });
+
+    const audio = new CalmAudioController();
+    try {
+      await audio.start();
+
+      expect(mockCtx.createWaveShaper).toHaveBeenCalledTimes(1);
+      expect(mockCtx.createDynamicsCompressor).toHaveBeenCalledTimes(1);
+      expect(mockWaveShaper.curve).toBeInstanceOf(Float32Array);
+      expect(compressorConnectSpy).toHaveBeenCalledWith(mockWaveShaper);
+      expect(limiterConnectSpy).toHaveBeenCalledTimes(1);
+
+      const scheduledVoice = createdSources.find((src) => !src.loop && src.onended !== null);
+      expect(scheduledVoice).toBeDefined();
+      scheduledVoice!.onended!();
+      expect(voiceDisconnectSpies.some((spy) => spy.mock.calls.length > 0)).toBe(true);
+
+      const sourcesAfterStart = createBufferSourceSpy.mock.calls.length;
+      const resumesAfterStart = resumeSpy.mock.calls.length;
+      for (const vol of [20, 40, 60, 80, 95]) {
+        audio.setVolume(vol);
+      }
+      expect(createBufferSourceSpy.mock.calls.length).toBe(sourcesAfterStart);
+      expect(resumeSpy.mock.calls.length).toBe(resumesAfterStart);
+    } finally {
+      audio.dispose();
+      if (origWindowDesc) Object.defineProperty(globalThis, 'window', origWindowDesc);
+      else Reflect.deleteProperty(globalThis, 'window');
     }
   });
 });

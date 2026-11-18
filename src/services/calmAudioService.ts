@@ -14,13 +14,378 @@ export interface CalmAudioState {
 
 const DEFAULT_VOLUME_PERCENT = 65;
 const SCHEDULER_INTERVAL_MS = 180;
-const AMBIENT_LOOP_SECONDS = 6;
-const NOISE_BURST_SECONDS = 0.6;
+const AMBIENT_LOOP_SECONDS = 8;
 const FADE_SECONDS = 0.45;
-const SILENT_WAV_SAMPLE_RATE = 8000;
-const SILENT_WAV_SAMPLES = 800; // 0.1s digital silence for iOS playback session unlock
+const SILENT_WAV_SAMPLE_RATE = 22050;
+const SILENT_WAV_SAMPLES = 5512; // 0.25s digital silence for iOS playback session unlock
+const CRACKLE_VARIANT_COUNT = 12;
+const WOOD_POP_VARIANT_COUNT = 6;
 
 let cachedSilentWavDataUri: string | null = null;
+
+/**
+ * Applies a constant-0-dB-peak RBJ 2nd-order bandpass filter, clamping cutoff
+ * below 42% of the sample rate for unconditional stability on 16 kHz+ devices.
+ */
+export function applyBiquadBandpass(
+  input: Float32Array,
+  fc: number,
+  q: number,
+  sampleRate: number,
+): Float32Array {
+  const safeSr = Math.max(8000, sampleRate || 44100);
+  const safeFc = Math.max(20, Math.min(fc, safeSr * 0.42));
+  const safeQ = Math.max(0.1, q);
+  const w0 = (2 * Math.PI * safeFc) / safeSr;
+  const sinW = Math.sin(w0);
+  const cosW = Math.cos(w0);
+  const alpha = sinW / (2 * safeQ);
+  const b0 = alpha;
+  const b2 = -alpha;
+  const a0 = 1 + alpha;
+  const a1 = -2 * cosW;
+  const a2 = 1 - alpha;
+
+  const out = new Float32Array(input.length);
+  let x1 = 0;
+  let x2 = 0;
+  let y1 = 0;
+  let y2 = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    const x0 = input[i] ?? 0;
+    const y0 = (b0 * x0 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
+    out[i] = y0;
+    x2 = x1;
+    x1 = x0;
+    y2 = y1;
+    y1 = y0;
+  }
+  return out;
+}
+
+/**
+ * Applies a sample-rate-invariant 1-pole lowpass filter with safe Nyquist clamping.
+ */
+export function applyOnePoleLowpass(
+  input: Float32Array,
+  fc: number,
+  sampleRate: number,
+): Float32Array {
+  const safeSr = Math.max(8000, sampleRate || 44100);
+  const safeFc = Math.max(20, Math.min(fc, safeSr * 0.42));
+  const a = Math.exp((-2 * Math.PI * safeFc) / safeSr);
+  const out = new Float32Array(input.length);
+  let y = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    y = y * a + (input[i] ?? 0) * (1 - a);
+    out[i] = y;
+  }
+  return out;
+}
+
+/**
+ * Builds a C1-continuous soft-limiter transfer curve: unity gain inside [-0.7, 0.7]
+ * and smooth hyperbolic saturation above -3.1 dBFS, bounded within [-0.95, 0.95].
+ */
+export function buildSoftLimiterCurve(samples = 1025): Float32Array<ArrayBuffer> {
+  const count = Math.max(3, Math.floor(samples));
+  const curve = new Float32Array(new ArrayBuffer(count * Float32Array.BYTES_PER_ELEMENT));
+  for (let i = 0; i < count; i += 1) {
+    const x = (i / (count - 1)) * 2 - 1;
+    const absX = Math.abs(x);
+    if (absX <= 0.7) {
+      curve[i] = x;
+    } else {
+      curve[i] = Math.sign(x) * (0.7 + 0.25 * Math.tanh((absX - 0.7) / 0.25));
+    }
+  }
+  return curve;
+}
+
+/**
+ * Synthesizes an 8-second seamless warm flame bed (75-520 Hz) with organic
+ * breath modulation, zero baked impulses, zero white-noise hiss, and ~-23.3 dBFS RMS.
+ */
+export function synthesizeFlameBedSamples(
+  sampleRate: number,
+  durationSeconds = AMBIENT_LOOP_SECONDS,
+): Float32Array {
+  const safeSr = Math.max(8000, sampleRate || 44100);
+  const frameCount = Math.max(1, Math.floor(safeSr * durationSeconds));
+  const fadeFrames = Math.min(Math.floor(frameCount * 0.25), Math.floor(safeSr * 0.4));
+  const totalFrames = frameCount + fadeFrames;
+  const raw = new Float32Array(totalFrames);
+
+  const aHp75 = Math.exp((-2 * Math.PI * Math.min(75, safeSr * 0.42)) / safeSr);
+  const aHp175 = Math.exp((-2 * Math.PI * Math.min(175, safeSr * 0.42)) / safeSr);
+  const aLp240 = Math.exp((-2 * Math.PI * Math.min(240, safeSr * 0.42)) / safeSr);
+  const aLp520 = Math.exp((-2 * Math.PI * Math.min(520, safeSr * 0.42)) / safeSr);
+  const aEnvSlow = Math.exp((-2 * Math.PI * 1.6) / safeSr);
+  const aEnvLick = Math.exp((-2 * Math.PI * 4.2) / safeSr);
+
+  let lpA1 = 0;
+  let lpA2 = 0;
+  let lpB1 = 0;
+  let lpB2 = 0;
+  let lpB3 = 0;
+  let hp75In = 0;
+  let hp75Out = 0;
+  let hp175In = 0;
+  let hp175Out = 0;
+  let envSlow = 0;
+  let envLick = 0;
+
+  for (let i = 0; i < totalFrames; i += 1) {
+    const w1 = Math.random() * 2 - 1;
+    const w2 = Math.random() * 2 - 1;
+
+    envSlow = envSlow * aEnvSlow + (Math.random() * 2 - 1) * (1 - aEnvSlow);
+    envLick = envLick * aEnvLick + (Math.random() * 2 - 1) * (1 - aEnvLick);
+    const t = i / safeSr;
+    const breath =
+      0.78 +
+      0.16 * Math.sin(2 * Math.PI * 0.25 * t) +
+      0.1 * Math.sin(2 * Math.PI * 0.625 * t + 1.1);
+    const mod = Math.max(0.35, Math.min(1.35, breath + envSlow * 1.7 + envLick * 0.65));
+
+    // Hearth low warmth (75-240 Hz)
+    lpA1 = lpA1 * aLp240 + w1 * (1 - aLp240);
+    lpA2 = lpA2 * aLp240 + lpA1 * (1 - aLp240);
+    const hp75 = aHp75 * (hp75Out + lpA2 - hp75In);
+    hp75In = lpA2;
+    hp75Out = hp75;
+
+    // Lapping flame mid warmth (175-520 Hz, 3-pole LPF for clean phone presence without hiss)
+    lpB1 = lpB1 * aLp520 + w2 * (1 - aLp520);
+    lpB2 = lpB2 * aLp520 + lpB1 * (1 - aLp520);
+    lpB3 = lpB3 * aLp520 + lpB2 * (1 - aLp520);
+    const hp175 = aHp175 * (hp175Out + lpB3 - hp175In);
+    hp175In = lpB3;
+    hp175Out = hp175;
+
+    raw[i] = (hp75 * 1.15 + hp175 * 1.45) * mod;
+  }
+
+  const out = new Float32Array(frameCount);
+  for (let i = 0; i < frameCount; i += 1) {
+    if (i < fadeFrames) {
+      const p = i / fadeFrames;
+      out[i] =
+        (raw[i] ?? 0) * Math.sin(p * Math.PI * 0.5) +
+        (raw[frameCount + i] ?? 0) * Math.cos(p * Math.PI * 0.5);
+    } else {
+      out[i] = raw[i] ?? 0;
+    }
+  }
+
+  let mean = 0;
+  for (let i = 0; i < frameCount; i += 1) mean += out[i] ?? 0;
+  mean /= frameCount;
+  let sumSq = 0;
+  for (let i = 0; i < frameCount; i += 1) {
+    const centered = (out[i] ?? 0) - mean;
+    out[i] = centered;
+    sumSq += centered * centered;
+  }
+  const rms = Math.sqrt(sumSq / frameCount) || 1;
+  const gain = 0.068 / rms;
+  for (let i = 0; i < frameCount; i += 1) {
+    out[i] = Math.max(-0.28, Math.min(0.28, (out[i] ?? 0) * gain));
+  }
+  return out;
+}
+
+function finalizeTransientSamples(
+  out: Float32Array,
+  targetPeak: number,
+  edgeCap: number,
+): Float32Array {
+  const len = out.length;
+  const edgeN = Math.max(1, Math.min(edgeCap, Math.floor(len / 6)));
+  const win = new Float32Array(len);
+  let sumOut = 0;
+  let sumWin = 0;
+
+  for (let i = 0; i < len; i += 1) {
+    const edge =
+      i < edgeN ? i / edgeN : i > len - 1 - edgeN ? (len - 1 - i) / edgeN : 1;
+    win[i] = edge;
+    const weighted = (out[i] ?? 0) * edge;
+    out[i] = weighted;
+    sumOut += weighted;
+    sumWin += edge;
+  }
+
+  const dcRatio = sumWin > 0 ? sumOut / sumWin : 0;
+  let peak = 0;
+  for (let i = 0; i < len; i += 1) {
+    const centered = (out[i] ?? 0) - dcRatio * (win[i] ?? 0);
+    out[i] = centered;
+    const absVal = Math.abs(centered);
+    if (absVal > peak) peak = absVal;
+  }
+
+  const scale = peak > 1e-6 ? targetPeak / peak : 0;
+  for (let i = 0; i < len; i += 1) {
+    out[i] = (out[i] ?? 0) * scale;
+  }
+  out[0] = 0;
+  out[len - 1] = 0;
+  return out;
+}
+
+/**
+ * Synthesizes one of 12 dry-wood/ember crackle transients (variants 9-11 are
+ * double-fracture crackles) with smooth endpoints, zero DC, and warm phone voicing.
+ */
+export function synthesizeCrackleSamples(
+  sampleRate: number,
+  variantIndex: number,
+): Float32Array {
+  const safeSr = Math.max(8000, sampleRate || 44100);
+  const idx =
+    ((Math.floor(variantIndex) % CRACKLE_VARIANT_COUNT) + CRACKLE_VARIANT_COUNT) %
+    CRACKLE_VARIANT_COUNT;
+  const isDouble = idx >= 9;
+  const durSec = isDouble ? 0.026 + (idx - 9) * 0.005 : 0.012 + (idx / 9) * 0.013;
+  const len = Math.max(64, Math.floor(safeSr * durSec));
+  const rawNoise = new Float32Array(len);
+  for (let i = 0; i < len; i += 1) {
+    rawNoise[i] = Math.random() * 2 - 1;
+  }
+
+  const fcHi = Math.min(1000 + ((idx * 173) % 1450), safeSr * 0.14);
+  const qHi = 1.0 + (idx % 4) * 0.22;
+  const fcBody = Math.min(450 + ((idx * 97) % 420), safeSr * 0.1);
+  const hiBand = applyOnePoleLowpass(
+    applyOnePoleLowpass(applyBiquadBandpass(rawNoise, fcHi, qHi, safeSr), 3000, safeSr),
+    3000,
+    safeSr,
+  );
+  const bodyBand = applyBiquadBandpass(rawNoise, fcBody, 1.35, safeSr);
+
+  const out = new Float32Array(len);
+  const attackSec = 0.0008 + (idx % 3) * 0.00025;
+  const tau = 0.002 + (idx % 5) * 0.0008;
+  const secondOffset = isDouble ? Math.floor(len * (0.34 + (idx - 9) * 0.07)) : -1;
+  const tailStart = Math.floor(len * 0.68);
+
+  for (let i = 0; i < len; i += 1) {
+    const t = i / safeSr;
+    let env =
+      t < attackSec
+        ? 0.5 * (1 - Math.cos((Math.PI * t) / attackSec))
+        : Math.exp(-(t - attackSec) / tau);
+    if (isDouble && i >= secondOffset) {
+      const t2 = (i - secondOffset) / safeSr;
+      const env2 =
+        t2 < attackSec
+          ? 0.5 * (1 - Math.cos((Math.PI * t2) / attackSec))
+          : Math.exp(-(t2 - attackSec) / (tau * 0.85));
+      env = Math.min(1, env + env2 * 0.72);
+    }
+    if (i >= tailStart) {
+      const u = (i - tailStart) / Math.max(1, len - 1 - tailStart);
+      env *= 0.5 * (1 + Math.cos(Math.PI * u));
+    }
+    out[i] = ((hiBand[i] ?? 0) * 0.68 + (bodyBand[i] ?? 0) * 0.55) * env;
+  }
+
+  return finalizeTransientSamples(out, 0.62, 20);
+}
+
+/**
+ * Synthesizes one of 6 hollow dry-wood pop transients combining a damped woody
+ * cavity resonance with a filtered onset snap, zero-padded at both boundaries.
+ */
+export function synthesizeWoodPopSamples(
+  sampleRate: number,
+  variantIndex: number,
+): Float32Array {
+  const safeSr = Math.max(8000, sampleRate || 44100);
+  const idx =
+    ((Math.floor(variantIndex) % WOOD_POP_VARIANT_COUNT) + WOOD_POP_VARIANT_COUNT) %
+    WOOD_POP_VARIANT_COUNT;
+  const durSec = 0.028 + idx * 0.004;
+  const len = Math.max(64, Math.floor(safeSr * durSec));
+  const rawNoise = new Float32Array(len);
+  for (let i = 0; i < len; i += 1) {
+    rawNoise[i] = Math.random() * 2 - 1;
+  }
+
+  const snapFc = Math.min(1100 + idx * 140, safeSr * 0.14);
+  const snapRaw = applyOnePoleLowpass(
+    applyBiquadBandpass(rawNoise, snapFc, 1.2, safeSr),
+    2800,
+    safeSr,
+  );
+  let snapPeak = 0;
+  for (let i = 0; i < len; i += 1) {
+    const absVal = Math.abs(snapRaw[i] ?? 0);
+    if (absVal > snapPeak) snapPeak = absVal;
+  }
+  const snapNorm = snapPeak > 1e-6 ? 1 / snapPeak : 0;
+
+  const out = new Float32Array(len);
+  const f0 = 260 + idx * 38;
+  const f1 = f0 * 0.78;
+  const attackSec = 0.0016;
+  const tauBody = 0.0065 + idx * 0.0011;
+  const tauSnap = 0.0026;
+  const tailStart = Math.floor(len * 0.7);
+  let phase1 = 0;
+  let phase2 = 0;
+
+  for (let i = 0; i < len; i += 1) {
+    const t = i / safeSr;
+    const frac = Math.min(1, t / 0.016);
+    const freq = f0 + (f1 - f0) * frac;
+    phase1 += (2 * Math.PI * freq) / safeSr;
+    phase2 += (2 * Math.PI * freq * 1.58) / safeSr;
+
+    const atk = t < attackSec ? 0.5 * (1 - Math.cos((Math.PI * t) / attackSec)) : 1;
+    const bodyEnv = atk * Math.exp(-t / tauBody);
+    const snapEnv =
+      t < 0.0008
+        ? 0.5 * (1 - Math.cos((Math.PI * t) / 0.0008))
+        : Math.exp(-(t - 0.0008) / tauSnap);
+    const tail =
+      i >= tailStart
+        ? 0.5 * (1 + Math.cos((Math.PI * (i - tailStart)) / Math.max(1, len - 1 - tailStart)))
+        : 1;
+
+    const wood =
+      Math.sin(phase1) * 0.62 +
+      Math.sin(phase2) * 0.22 * Math.exp(-t / (tauBody * 0.5));
+    const snap = (snapRaw[i] ?? 0) * snapNorm * snapEnv * 0.72;
+    out[i] = (wood * bodyEnv * 0.62 + snap) * tail;
+  }
+
+  return finalizeTransientSamples(out, 0.6, 24);
+}
+
+function safeDisconnect(...nodes: Array<AudioNode | null | undefined>): void {
+  for (const node of nodes) {
+    if (!node) continue;
+    try {
+      if (typeof node.disconnect === 'function') {
+        node.disconnect();
+      }
+    } catch {
+      // Ignore already-disconnected or mocked nodes.
+    }
+  }
+}
+
+function bindVoiceCleanup(
+  source: AudioScheduledSourceNode,
+  ...nodes: Array<AudioNode | null | undefined>
+): void {
+  source.onended = () => {
+    source.onended = null;
+    safeDisconnect(source, ...nodes);
+  };
+}
 
 function clampVolumePercent(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_VOLUME_PERCENT;
@@ -89,13 +454,18 @@ export class CalmAudioController {
   private birdsGain: GainNode | null = null;
 
   private fireLoopSource: AudioBufferSourceNode | null = null;
-  private noiseBurstBuffer: AudioBuffer | null = null;
+  private crackleBuffers: AudioBuffer[] = [];
+  private woodPopBuffers: AudioBuffer[] = [];
+  private firePanLanes: AudioNode[] = [];
+  private lastCrackleIdx = -1;
+  private lastWoodPopIdx = -1;
   private keepAliveAudio: HTMLAudioElement | null = null;
   private schedulerId: number | null = null;
   private gestureUnlockBound = false;
 
   private nextFireAt = 0;
   private nextClusterAt = 0;
+  private nextWoodPopAt = 0;
   private nextCricketAt = 0;
   private nextFrogAt = 0;
   private nextOwlAt = 0;
@@ -175,7 +545,7 @@ export class CalmAudioController {
     this.isMuted = Boolean(muted);
     if (this.isPlaying && !this.isMuted) {
       this.unlockIosAudioSession();
-      if (this.ctx) {
+      if (this.ctx && (this.ctx.state as string) !== 'running') {
         this.unlockContext(this.ctx);
       }
     } else if (this.isMuted) {
@@ -193,7 +563,7 @@ export class CalmAudioController {
     this.volumePercent = clampVolumePercent(volumePercent);
     if (this.isPlaying && !this.isMuted) {
       this.unlockIosAudioSession();
-      if (this.ctx) {
+      if (this.ctx && (this.ctx.state as string) !== 'running') {
         this.unlockContext(this.ctx);
       }
     }
@@ -205,7 +575,7 @@ export class CalmAudioController {
     this.preset = preset;
     if (this.isPlaying && !this.isMuted) {
       this.unlockIosAudioSession();
-      if (this.ctx) {
+      if (this.ctx && (this.ctx.state as string) !== 'running') {
         this.unlockContext(this.ctx);
       }
     }
@@ -266,8 +636,20 @@ export class CalmAudioController {
     } catch {
       // Node may already be stopped.
     }
+    safeDisconnect(
+      this.fireLoopSource,
+      ...this.firePanLanes,
+      this.fireGain,
+      this.nightGain,
+      this.birdsGain,
+      this.masterGain,
+    );
     this.fireLoopSource = null;
-    this.noiseBurstBuffer = null;
+    this.crackleBuffers = [];
+    this.woodPopBuffers = [];
+    this.firePanLanes = [];
+    this.lastCrackleIdx = -1;
+    this.lastWoodPopIdx = -1;
 
     if (this.ctx) {
       this.ctx.onstatechange = null;
@@ -316,7 +698,7 @@ export class CalmAudioController {
       }
     }
 
-    if (this.keepAliveAudio) {
+    if (this.keepAliveAudio && this.keepAliveAudio.paused !== false) {
       try {
         const playResult = this.keepAliveAudio.play();
         if (playResult && typeof playResult.catch === 'function') {
@@ -357,6 +739,7 @@ export class CalmAudioController {
       const unlockSource = ctx.createBufferSource();
       unlockSource.buffer = silentBuffer;
       unlockSource.connect(ctx.destination);
+      bindVoiceCleanup(unlockSource);
       unlockSource.start(0);
     } catch {
       // Ignore unlock failures on mocked/closed contexts.
@@ -390,119 +773,91 @@ export class CalmAudioController {
     masterGain.connect(ctx.destination);
     this.masterGain = masterGain;
 
+    let mixDestination: AudioNode = masterGain;
+    if (typeof ctx.createWaveShaper === 'function') {
+      const limiter = ctx.createWaveShaper();
+      limiter.curve = buildSoftLimiterCurve();
+      try {
+        limiter.oversample = '2x';
+      } catch {
+        // Ignore read-only oversample stubs.
+      }
+      limiter.connect(masterGain);
+      mixDestination = limiter;
+    }
+
+    if (typeof ctx.createDynamicsCompressor === 'function') {
+      const compressor = ctx.createDynamicsCompressor();
+      if (compressor.threshold) compressor.threshold.value = -12;
+      if (compressor.knee) compressor.knee.value = 14;
+      if (compressor.ratio) compressor.ratio.value = 5;
+      if (compressor.attack) compressor.attack.value = 0.003;
+      if (compressor.release) compressor.release.value = 0.16;
+      compressor.connect(mixDestination);
+      mixDestination = compressor;
+    }
+
     const fireGain = ctx.createGain();
     fireGain.gain.value = 0;
-    fireGain.connect(masterGain);
+    fireGain.connect(mixDestination);
     this.fireGain = fireGain;
 
     const nightGain = ctx.createGain();
     nightGain.gain.value = 0;
-    nightGain.connect(masterGain);
+    nightGain.connect(mixDestination);
     this.nightGain = nightGain;
 
     const birdsGain = ctx.createGain();
     birdsGain.gain.value = 0;
-    birdsGain.connect(masterGain);
+    birdsGain.connect(mixDestination);
     this.birdsGain = birdsGain;
 
-    this.noiseBurstBuffer = this.buildNoiseBurstBuffer(ctx);
-    this.startAmbientLoops(ctx, fireGain);
-  }
-
-  private startAmbientLoops(ctx: AudioContext, fireGain: GainNode): void {
     const sampleRate = Math.max(8000, ctx.sampleRate || 44100);
-    const frameCount = Math.floor(sampleRate * AMBIENT_LOOP_SECONDS);
-    const fadeFrames = Math.floor(sampleRate * 0.2);
-    const totalFrames = frameCount + fadeFrames;
+    const fireHighpass = ctx.createBiquadFilter();
+    fireHighpass.type = 'highpass';
+    fireHighpass.frequency.value = Math.min(75, sampleRate * 0.42);
+    if (fireHighpass.Q) fireHighpass.Q.value = 0.707;
 
-    // Very soft <140 Hz low draft murmur only (<= 0.035 amplitude, zero mid/high noise hiss).
-    const rawDraft = new Float32Array(totalFrames);
-    const a130 = Math.exp((-2 * Math.PI * 130) / sampleRate);
-    let lp1 = 0;
-    let lp2 = 0;
-    for (let i = 0; i < totalFrames; i += 1) {
-      const white = Math.random() * 2 - 1;
-      lp1 = lp1 * a130 + white * (1 - a130);
-      lp2 = lp2 * a130 + lp1 * (1 - a130);
-      rawDraft[i] = Math.max(-0.035, Math.min(0.035, lp2 * 0.16));
+    const fireLowpass = ctx.createBiquadFilter();
+    fireLowpass.type = 'lowpass';
+    fireLowpass.frequency.value = Math.min(3400, sampleRate * 0.42);
+    if (fireLowpass.Q) fireLowpass.Q.value = 0.65;
+
+    fireHighpass.connect(fireLowpass);
+    fireLowpass.connect(fireGain);
+
+    if (typeof ctx.createStereoPanner === 'function') {
+      this.firePanLanes = [-0.28, 0, 0.28].map((pan) => {
+        const panner = ctx.createStereoPanner();
+        panner.pan.value = pan;
+        panner.connect(fireHighpass);
+        return panner;
+      });
+    } else {
+      this.firePanLanes = [fireHighpass];
     }
 
-    const fireBuffer = ctx.createBuffer(1, frameCount, sampleRate);
-    const outFire = fireBuffer.getChannelData(0);
+    this.crackleBuffers = Array.from({ length: CRACKLE_VARIANT_COUNT }, (_, idx) =>
+      this.buildBufferFromSamples(ctx, synthesizeCrackleSamples(sampleRate, idx)),
+    );
+    this.woodPopBuffers = Array.from({ length: WOOD_POP_VARIANT_COUNT }, (_, idx) =>
+      this.buildBufferFromSamples(ctx, synthesizeWoodPopSamples(sampleRate, idx)),
+    );
 
-    // Crossfade the sub-140 Hz air draft seamlessly over the 6s boundary.
-    for (let i = 0; i < frameCount; i += 1) {
-      if (i < fadeFrames) {
-        const blend = i / fadeFrames;
-        outFire[i] = rawDraft[i]! * blend + rawDraft[frameCount + i]! * (1 - blend);
-      } else {
-        outFire[i] = rawDraft[i]!;
-      }
-    }
-
-    // Scatter discrete, clustered dry charcoal/wood micro-crackles across quiet gaps.
-    const spikeSamples = Math.max(2, Math.floor(0.0004 * sampleRate));
-    let cursor = Math.floor((0.02 + Math.random() * 0.04) * sampleRate);
-    let clusterRemaining = 2 + Math.floor(Math.random() * 5);
-
-    while (cursor < frameCount) {
-      const impulseSamples = Math.max(
-        8,
-        Math.floor((0.0006 + Math.random() * 0.0026) * sampleRate)
-      );
-      const fHigh = 2200 + Math.random() * 3400;
-      const tauHigh = 0.0005 + Math.random() * 0.0009;
-      const fLow = 550 + Math.random() * 900;
-      const tauLow = 0.001 + Math.random() * 0.0018;
-      const amp = 0.16 + Math.random() * 0.44;
-      const sign = Math.random() < 0.5 ? 1 : -1;
-
-      for (let k = 0; k < impulseSamples; k += 1) {
-        const t = k / sampleRate;
-        const spike = k < spikeSamples ? (1 - k / spikeSamples) * (Math.random() * 2 - 1) * 0.45 : 0;
-        const hi = Math.sin(2 * Math.PI * fHigh * t) * Math.exp(-t / tauHigh) * 0.58;
-        const lo = Math.sin(2 * Math.PI * fLow * t) * Math.exp(-t / tauLow) * 0.42;
-        const idx = (cursor + k) % frameCount;
-        outFire[idx] = (outFire[idx] ?? 0) + sign * amp * (spike + hi + lo);
-      }
-
-      clusterRemaining -= 1;
-      if (clusterRemaining <= 0) {
-        clusterRemaining = 2 + Math.floor(Math.random() * 5);
-        cursor += Math.floor((0.055 + Math.random() * 0.13) * sampleRate);
-      } else {
-        cursor += Math.floor((0.01 + Math.random() * 0.032) * sampleRate);
-      }
-    }
-
-    for (let i = 0; i < frameCount; i += 1) {
-      const sample = outFire[i] ?? 0;
-      if (sample > 0.92) outFire[i] = 0.92;
-      else if (sample < -0.92) outFire[i] = -0.92;
-    }
-
+    const bedSamples = synthesizeFlameBedSamples(sampleRate, AMBIENT_LOOP_SECONDS);
+    const fireBuffer = this.buildBufferFromSamples(ctx, bedSamples);
     const fireSource = ctx.createBufferSource();
     fireSource.buffer = fireBuffer;
     fireSource.loop = true;
-
-    const hearthFilter = ctx.createBiquadFilter();
-    hearthFilter.type = 'lowpass';
-    hearthFilter.frequency.value = 4800;
-    fireSource.connect(hearthFilter);
-    hearthFilter.connect(fireGain);
-
+    fireSource.connect(fireHighpass);
     fireSource.start();
     this.fireLoopSource = fireSource;
   }
 
-  private buildNoiseBurstBuffer(ctx: AudioContext): AudioBuffer {
+  private buildBufferFromSamples(ctx: AudioContext, samples: Float32Array): AudioBuffer {
     const sampleRate = Math.max(8000, ctx.sampleRate || 44100);
-    const frameCount = Math.max(1, Math.floor(sampleRate * NOISE_BURST_SECONDS));
-    const buffer = ctx.createBuffer(1, frameCount, sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < frameCount; i += 1) {
-      data[i] = Math.random() * 2 - 1;
-    }
+    const buffer = ctx.createBuffer(1, samples.length, sampleRate);
+    buffer.getChannelData(0).set(samples);
     return buffer;
   }
 
@@ -534,7 +889,7 @@ export class CalmAudioController {
     }
 
     const now = this.ctx.currentTime;
-    const effectiveMaster = !this.isPlaying || this.isMuted ? 0 : (this.volumePercent / 100) * 0.95;
+    const effectiveMaster = !this.isPlaying || this.isMuted ? 0 : (this.volumePercent / 100) * 0.88;
 
     const hasFire =
       this.preset === 'fire-night' ||
@@ -543,9 +898,9 @@ export class CalmAudioController {
     const hasNight = this.preset === 'fire-night' || this.preset === 'night-only';
     const hasBirds = this.preset === 'fire-birds' || this.preset === 'birds-only';
 
-    const fireLevel = hasFire ? 0.75 : 0;
-    const nightLevel = hasNight ? 0.9 : 0;
-    const birdsLevel = hasBirds ? 0.9 : 0;
+    const fireLevel = hasFire ? 0.82 : 0;
+    const nightLevel = hasNight ? 0.82 : 0;
+    const birdsLevel = hasBirds ? 0.82 : 0;
 
     this.masterGain.gain.setTargetAtTime(effectiveMaster, now, 0.12);
     this.fireGain.gain.setTargetAtTime(fireLevel, now, FADE_SECONDS);
@@ -555,7 +910,8 @@ export class CalmAudioController {
 
   private resetScheduleHorizons(now: number): void {
     this.nextFireAt = now + 0.02 + Math.random() * 0.08;
-    this.nextClusterAt = now + 0.5 + Math.random() * 0.9;
+    this.nextClusterAt = now + 1.0 + Math.random() * 1.4;
+    this.nextWoodPopAt = now + 0.8 + Math.random() * 1.6;
     this.nextCricketAt = now + 0.08 + Math.random() * 0.22;
     this.nextFrogAt = now + 1.8 + Math.random() * 2.2;
     this.nextOwlAt = now + 4.2 + Math.random() * 4.5;
@@ -592,6 +948,7 @@ export class CalmAudioController {
 
     if (this.nextFireAt < now) this.nextFireAt = now + 0.015;
     if (this.nextClusterAt < now) this.nextClusterAt = now + 0.12;
+    if (this.nextWoodPopAt < now) this.nextWoodPopAt = now + 0.2;
     if (this.nextCricketAt < now) this.nextCricketAt = now + 0.08;
     if (this.nextFrogAt < now) this.nextFrogAt = now + 0.2;
     if (this.nextOwlAt < now) this.nextOwlAt = now + 0.4;
@@ -606,16 +963,24 @@ export class CalmAudioController {
 
     if (hasFire) {
       while (this.nextFireAt < horizon) {
-        this.triggerFireSnap(this.nextFireAt);
-        if (Math.random() < 0.38) {
-          this.triggerFireSnap(this.nextFireAt + 0.018 + Math.random() * 0.034, 0.78);
+        this.triggerFireCrackle(this.nextFireAt);
+        if (Math.random() < 0.35) {
+          this.triggerFireCrackle(this.nextFireAt + 0.026 + Math.random() * 0.042, 0.62);
         }
-        this.nextFireAt += 0.16 + Math.random() * 0.44;
+        this.nextFireAt += 0.18 + Math.random() * 0.38;
       }
 
       if (this.nextClusterAt < horizon) {
         this.triggerCrackleCluster(this.nextClusterAt);
-        this.nextClusterAt = Math.max(horizon, this.nextClusterAt) + 1.1 + Math.random() * 2.3;
+        this.nextClusterAt = Math.max(horizon, this.nextClusterAt) + 1.8 + Math.random() * 2.6;
+      }
+
+      if (this.nextWoodPopAt < horizon) {
+        this.triggerWoodPop(this.nextWoodPopAt);
+        if (Math.random() < 0.45) {
+          this.triggerFireCrackle(this.nextWoodPopAt + 0.045 + Math.random() * 0.065, 0.55);
+        }
+        this.nextWoodPopAt = Math.max(horizon, this.nextWoodPopAt) + 1.6 + Math.random() * 2.6;
       }
     }
 
@@ -649,78 +1014,93 @@ export class CalmAudioController {
     }
   }
 
-  private connectWithPan(source: AudioNode, target: AudioNode, pan: number): void {
-    if (!this.ctx) return;
+  private connectWithPan(source: AudioNode, target: AudioNode, pan: number): AudioNode | null {
+    if (!this.ctx) return null;
     if (typeof this.ctx.createStereoPanner === 'function') {
       const panner = this.ctx.createStereoPanner();
       panner.pan.value = Math.max(-1, Math.min(1, pan));
       source.connect(panner);
       panner.connect(target);
-      return;
+      return panner;
     }
     source.connect(target);
+    return null;
   }
 
-  private triggerFireSnap(at: number, amplitudeScale = 1): void {
-    if (!this.ctx || !this.fireGain || !this.noiseBurstBuffer) return;
+  private triggerBufferedFireVoice(
+    buffers: AudioBuffer[],
+    lastIdx: number,
+    at: number,
+    gainMin: number,
+    gainMax: number,
+    rateMin: number,
+    rateMax: number,
+    amplitudeScale: number,
+  ): number {
+    if (!this.ctx || !this.fireGain || buffers.length === 0) return lastIdx;
+
+    let idx = Math.floor(Math.random() * buffers.length);
+    if (buffers.length > 1 && idx === lastIdx) {
+      idx = (idx + 1 + Math.floor(Math.random() * (buffers.length - 1))) % buffers.length;
+    }
+    const buffer = buffers[idx];
+    if (!buffer) return lastIdx;
 
     const startAt = Math.max(this.ctx.currentTime + 0.012, at);
-    const pan = (Math.random() - 0.5) * 0.45;
-
-    // 1. Crisp fracture click (3.5-7.5 ms) — short high-Q snap without sustained static hiss.
     const src = this.ctx.createBufferSource();
-    src.buffer = this.noiseBurstBuffer;
+    src.buffer = buffer;
+    if (src.playbackRate) {
+      src.playbackRate.value = rateMin + Math.random() * (rateMax - rateMin);
+    }
 
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.value = 1800 + Math.random() * 2800;
-    filter.Q.value = 4.5 + Math.random() * 3.5;
+    const voiceGain = this.ctx.createGain();
+    voiceGain.gain.value = (gainMin + Math.random() * (gainMax - gainMin)) * amplitudeScale;
 
-    const clickGain = this.ctx.createGain();
-    const peak = (0.42 + Math.random() * 0.33) * amplitudeScale;
-    const decay = 0.0035 + Math.random() * 0.004;
+    const lane =
+      this.firePanLanes[Math.floor(Math.random() * this.firePanLanes.length)] ?? this.fireGain;
+    src.connect(voiceGain);
+    voiceGain.connect(lane);
+    bindVoiceCleanup(src, voiceGain);
+    src.start(startAt);
+    return idx;
+  }
 
-    clickGain.gain.setValueAtTime(0.0001, startAt);
-    clickGain.gain.linearRampToValueAtTime(peak, startAt + 0.0008);
-    clickGain.gain.exponentialRampToValueAtTime(0.0001, startAt + decay);
+  private triggerFireCrackle(at: number, amplitudeScale = 1): void {
+    this.lastCrackleIdx = this.triggerBufferedFireVoice(
+      this.crackleBuffers,
+      this.lastCrackleIdx,
+      at,
+      0.24,
+      0.65,
+      0.88,
+      1.12,
+      amplitudeScale,
+    );
+  }
 
-    src.connect(filter);
-    filter.connect(clickGain);
-    this.connectWithPan(clickGain, this.fireGain, pan);
-
-    const offset = Math.random() * Math.max(0.05, NOISE_BURST_SECONDS - 0.06);
-    src.start(startAt, offset, decay + 0.01);
-
-    // 2. Hollow dry-wood pop (9-16 ms) giving physical firewood "tok/pop" body.
-    const popOsc = this.ctx.createOscillator();
-    popOsc.type = 'triangle';
-    const popDur = 0.009 + Math.random() * 0.007;
-    const popStartHz = 380 + Math.random() * 380;
-    const popEndHz = 130 + Math.random() * 110;
-    popOsc.frequency.setValueAtTime(popStartHz, startAt);
-    popOsc.frequency.exponentialRampToValueAtTime(popEndHz, startAt + popDur);
-
-    const popGain = this.ctx.createGain();
-    const popPeak = (0.22 + Math.random() * 0.16) * amplitudeScale;
-    popGain.gain.setValueAtTime(0.0001, startAt);
-    popGain.gain.linearRampToValueAtTime(popPeak, startAt + 0.0012);
-    popGain.gain.exponentialRampToValueAtTime(0.0001, startAt + popDur);
-
-    popOsc.connect(popGain);
-    this.connectWithPan(popGain, this.fireGain, pan);
-    popOsc.start(startAt);
-    popOsc.stop(startAt + popDur + 0.01);
+  private triggerWoodPop(at: number, amplitudeScale = 1): void {
+    this.lastWoodPopIdx = this.triggerBufferedFireVoice(
+      this.woodPopBuffers,
+      this.lastWoodPopIdx,
+      at,
+      0.32,
+      0.6,
+      0.9,
+      1.1,
+      amplitudeScale,
+    );
   }
 
   private triggerCrackleCluster(at: number): void {
     if (!this.ctx || !this.fireGain) return;
 
-    const count = 4 + Math.floor(Math.random() * 5);
+    const count = 2 + Math.floor(Math.random() * 3);
     let cursor = Math.max(this.ctx.currentTime + 0.012, at);
     for (let i = 0; i < count; i += 1) {
-      const scale = 0.35 + Math.random() * 0.6;
-      this.triggerFireSnap(cursor, scale);
-      cursor += 0.014 + Math.random() * 0.024;
+      const taper = 1 - i * 0.14;
+      const scale = (0.3 + Math.random() * 0.32) * Math.max(0.45, taper);
+      this.triggerFireCrackle(cursor, scale);
+      cursor += 0.032 + Math.random() * 0.056;
     }
   }
 
@@ -748,6 +1128,7 @@ export class CalmAudioController {
     bandpass.Q.value = 2.4;
 
     const gain = this.ctx.createGain();
+    gain.gain.value = 0;
     gain.gain.setValueAtTime(0.0001, startAt);
 
     const peak = 0.16 + Math.random() * 0.08;
@@ -760,7 +1141,8 @@ export class CalmAudioController {
 
     osc.connect(bandpass);
     bandpass.connect(gain);
-    this.connectWithPan(gain, this.nightGain, voice.pan);
+    const panner = this.connectWithPan(gain, this.nightGain, voice.pan);
+    bindVoiceCleanup(osc, bandpass, gain, panner);
 
     const totalEnd = startAt + pulseCount * pulseGap + 0.03;
     osc.start(startAt);
@@ -781,12 +1163,14 @@ export class CalmAudioController {
       osc.frequency.exponentialRampToValueAtTime(2160, t + 0.052);
 
       const gain = this.ctx.createGain();
+      gain.gain.value = 0;
       gain.gain.setValueAtTime(0.0001, t);
       gain.gain.linearRampToValueAtTime(0.16, t + 0.011);
       gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.058);
 
       osc.connect(gain);
-      this.connectWithPan(gain, this.nightGain, pan);
+      const panner = this.connectWithPan(gain, this.nightGain, pan);
+      bindVoiceCleanup(osc, gain, panner);
       osc.start(t);
       osc.stop(t + 0.068);
     }
@@ -814,13 +1198,15 @@ export class CalmAudioController {
       filter.frequency.value = 780;
 
       const gain = this.ctx.createGain();
+      gain.gain.value = 0;
       gain.gain.setValueAtTime(0.0001, t);
       gain.gain.linearRampToValueAtTime(0.17, t + 0.055);
       gain.gain.exponentialRampToValueAtTime(0.0001, t + note.dur);
 
       osc.connect(filter);
       filter.connect(gain);
-      this.connectWithPan(gain, this.nightGain, pan);
+      const panner = this.connectWithPan(gain, this.nightGain, pan);
+      bindVoiceCleanup(osc, filter, gain, panner);
       osc.start(t);
       osc.stop(t + note.dur + 0.02);
     }
@@ -883,6 +1269,7 @@ export class CalmAudioController {
     filter.Q.value = 1.2;
 
     const gain = this.ctx.createGain();
+    gain.gain.value = 0;
     const attack = Math.min(0.025, duration * 0.22);
     gain.gain.setValueAtTime(0.0001, startAt);
     gain.gain.linearRampToValueAtTime(peak, startAt + attack);
@@ -890,7 +1277,8 @@ export class CalmAudioController {
 
     osc.connect(filter);
     filter.connect(gain);
-    this.connectWithPan(gain, this.birdsGain, pan);
+    const panner = this.connectWithPan(gain, this.birdsGain, pan);
+    bindVoiceCleanup(osc, filter, gain, panner);
     osc.start(startAt);
     osc.stop(startAt + duration + 0.02);
   }
