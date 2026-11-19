@@ -120,15 +120,18 @@ export function parseStarBinary(buffer: ArrayBuffer): StarCatalogData {
   };
 }
 
+export const CATALOG_DATA_VERSION = '1';
+
 /**
  * Fetches stars.bin, constellations.json, star-names.json, and dso.json in parallel.
  */
 export async function loadCelestialCatalog(): Promise<LoadedCelestialData> {
+  const versionSuffix = `?v=${CATALOG_DATA_VERSION}`;
   const [binRes, constRes, namesRes, dsoRes] = await Promise.all([
-    fetch('/data/stars.bin'),
-    fetch('/data/constellations.json'),
-    fetch('/data/star-names.json'),
-    fetch('/data/dso.json'),
+    fetch(`/data/stars.bin${versionSuffix}`),
+    fetch(`/data/constellations.json${versionSuffix}`),
+    fetch(`/data/star-names.json${versionSuffix}`),
+    fetch(`/data/dso.json${versionSuffix}`),
   ]);
 
   if (!binRes.ok || !constRes.ok || !namesRes.ok || !dsoRes.ok) {

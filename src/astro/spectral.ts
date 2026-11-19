@@ -74,3 +74,32 @@ export function computeAirmass(altDeg: number): number {
   const altRad = (clampedAlt * Math.PI) / 180;
   return 1 / (Math.sin(altRad) + 0.50572 * Math.pow(clampedAlt + 6.07995, -1.6364));
 }
+
+export interface BortleProfile {
+  classNumber: number;
+  label: string;
+  magShift: number;
+  skyglowIntensity: number;
+}
+
+const BORTLE_PROFILES: readonly BortleProfile[] = [
+  { classNumber: 1, label: 'Excellent Dark-Sky', magShift: 1.1, skyglowIntensity: 0.0 },
+  { classNumber: 2, label: 'Typical Dark Site', magShift: 0.75, skyglowIntensity: 0.08 },
+  { classNumber: 3, label: 'Rural Sky', magShift: 0.35, skyglowIntensity: 0.18 },
+  { classNumber: 4, label: 'Rural / Suburban', magShift: 0.0, skyglowIntensity: 0.32 },
+  { classNumber: 5, label: 'Suburban Sky', magShift: -0.45, skyglowIntensity: 0.5 },
+  { classNumber: 6, label: 'Bright Suburban', magShift: -0.95, skyglowIntensity: 0.72 },
+  { classNumber: 7, label: 'Suburban / Urban', magShift: -1.5, skyglowIntensity: 0.95 },
+  { classNumber: 8, label: 'City Sky', magShift: -2.05, skyglowIntensity: 1.25 },
+  { classNumber: 9, label: 'Inner-City Sky', magShift: -2.6, skyglowIntensity: 1.6 },
+];
+
+/**
+ * Maps Bortle Dark-Sky Scale class [1..9] to naked-eye limiting magnitude offset and horizon skyglow weight.
+ */
+export function getBortleProfile(bortleClass: number): BortleProfile {
+  const normalized = Number.isFinite(bortleClass)
+    ? Math.max(1, Math.min(9, Math.round(bortleClass)))
+    : 4;
+  return BORTLE_PROFILES[normalized - 1]!;
+}

@@ -1,0 +1,18 @@
+{
+  "name": "Stargazer — Live GPU Sky Observatory",
+  "short_name": "Stargazer",
+  "description": "Browser-based WebGPU/WebGL2 sky observatory with 41,000+ stars, planets, ISS passes, and live ADS-B traffic.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#030712",
+  "theme_color": "#050814",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

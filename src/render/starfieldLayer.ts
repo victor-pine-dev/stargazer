@@ -10,7 +10,6 @@ import {
   float,
   Fn,
   length,
-  log,
   max,
   mix,
   normalize,
@@ -26,6 +25,7 @@ import {
   vec4,
 } from 'three/tsl';
 import type { StarCatalogData } from '../data/catalogLoader';
+import { getBortleProfile } from '../astro/spectral';
 
 const STAR_SPHERE_RADIUS = 460;
 
@@ -41,42 +41,44 @@ export interface StarfieldLayer {
     viewportHeight: number;
     pixelRatio: number;
     showAtmosphere: boolean;
+    bortleClass?: number;
   }) => void;
   dispose: () => void;
 }
 
 /**
- * Evaluates Ballesteros' B-V -> Kelvin -> linear RGB blackbody color inside TSL.
- * T_eff = 4600 * (1 / (0.92*(B-V) + 1.7) + 1 / (0.92*(B-V) + 0.62))
+ * Evaluates Ballesteros' B-V -> Kelvin -> display RGB spectral tint once per star on catalog load.
  */
-const bvToBlackbodyNode = Fn(([bvInput]: [unknown]) => {
-  const bv = clamp(float(bvInput as number), float(-0.35), float(2.1));
-  const termA = float(1.0).div(bv.mul(0.92).add(1.7));
-  const termB = float(1.0).div(bv.mul(0.92).add(0.62));
-  const tempK = float(4600.0).mul(termA.add(termB));
-  const t = clamp(tempK, float(1800.0), float(32000.0)).div(100.0);
+function computePrecomputedStarRgb(bvInput: number): [number, number, number] {
+  const bv = Math.max(-0.35, Math.min(2.1, Number.isFinite(bvInput) ? bvInput : 0.65));
+  const termA = 1.0 / (bv * 0.92 + 1.7);
+  const termB = 1.0 / (bv * 0.92 + 0.62);
+  const tempK = 4600.0 * (termA + termB);
+  const t = Math.max(1800.0, Math.min(32000.0, tempK)) / 100.0;
 
-  // Planckian locus RGB approximation
-  const tOver60 = max(t.sub(60.0), float(0.01));
-  const rHigh = clamp(float(1.292936).mul(pow(tOver60, float(-0.133205))), float(0.0), float(1.0));
-  const r = select(t.lessThanEqual(66.0), float(1.0), rHigh);
+  const tOver60 = Math.max(t - 60.0, 0.01);
+  const rHigh = Math.max(0.0, Math.min(1.0, 1.292936 * Math.pow(tOver60, -0.133205)));
+  const r = t <= 66.0 ? 1.0 : rHigh;
 
-  const gLow = clamp(float(0.390082).mul(log(max(t, float(1.0)))).sub(0.631841), float(0.0), float(1.0));
-  const gHigh = clamp(float(1.129891).mul(pow(tOver60, float(-0.075515))), float(0.0), float(1.0));
-  const g = select(t.lessThanEqual(66.0), gLow, gHigh);
+  const gLow = Math.max(0.0, Math.min(1.0, 0.390082 * Math.log(Math.max(t, 1.0)) - 0.631841));
+  const gHigh = Math.max(0.0, Math.min(1.0, 1.129891 * Math.pow(tOver60, -0.075515)));
+  const g = t <= 66.0 ? gLow : gHigh;
 
-  const tMinus10 = max(t.sub(10.0), float(1.0));
-  const bMid = clamp(float(0.543207).mul(log(tMinus10)).sub(1.196254), float(0.0), float(1.0));
-  const b = select(
-    t.greaterThanEqual(66.0),
-    float(1.0),
-    select(t.lessThanEqual(19.0), float(0.0), bMid),
-  );
+  const tMinus10 = Math.max(t - 10.0, 1.0);
+  const bMid = Math.max(0.0, Math.min(1.0, 0.543207 * Math.log(tMinus10) - 1.196254));
+  const b = t >= 66.0 ? 1.0 : t <= 19.0 ? 0.0 : bMid;
 
-  // Subtle saturation boost so spectral differences (O/B blue, G gold, K/M amber) read clearly
-  const rgb = vec3(r, g, b);
-  return mix(vec3(1.0, 1.0, 1.0), rgb, float(0.88));
-});
+  return [
+    1.0 + (r - 1.0) * 0.88,
+    1.0 + (g - 1.0) * 0.88,
+    1.0 + (b - 1.0) * 0.88,
+  ];
+}
+
+function cpuSmoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
 
 /**
  * Creates the single-draw-call instanced spectral starfield layer (WebGPU + WebGL2 compatible).
@@ -88,10 +90,38 @@ export function createStarfieldLayer(catalog: StarCatalogData): StarfieldLayer {
   geometry.setAttribute('position', basePlane.getAttribute('position'));
   geometry.instanceCount = catalog.count;
 
+  const starColors = new Float32Array(catalog.count * 3);
+  const starMags = new Float32Array(catalog.count);
+  for (let i = 0; i < catalog.count; i++) {
+    const mIdx = i * 4;
+    starMags[i] = catalog.starMeta[mIdx];
+    const [r, g, b] = computePrecomputedStarRgb(catalog.starMeta[mIdx + 1]);
+    const cIdx = i * 3;
+    starColors[cIdx] = r;
+    starColors[cIdx + 1] = g;
+    starColors[cIdx + 2] = b;
+  }
+
+  const countStarsUpToMag = (maxMag: number): number => {
+    let lo = 0;
+    let hi = starMags.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (starMags[mid] <= maxMag) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo;
+  };
+
   const dirAttr = new THREE.InstancedBufferAttribute(catalog.positionsJ2000, 3);
   const metaAttr = new THREE.InstancedBufferAttribute(catalog.starMeta, 4);
+  const colorAttr = new THREE.InstancedBufferAttribute(starColors, 3);
   geometry.setAttribute('aStarDir', dirAttr);
   geometry.setAttribute('aStarMeta', metaAttr);
+  geometry.setAttribute('aStarColor', colorAttr);
 
   const uEqToWorld = uniform(new THREE.Matrix4());
   const uTime = uniform(0);
@@ -100,12 +130,13 @@ export function createStarfieldLayer(catalog: StarCatalogData): StarfieldLayer {
   const uViewport = uniform(new THREE.Vector2(1280, 720));
   const uPixelRatio = uniform(1);
   const uShowAtmosphere = uniform(1.0);
+  const uBortleMagShift = uniform(0.0);
 
   const aStarDir = attribute('aStarDir', 'vec3');
   const aStarMeta = attribute('aStarMeta', 'vec4');
 
   const vQuadUv = varying(positionGeometry.xy, 'vStarQuadUv');
-  const vStarColor = varying(bvToBlackbodyNode(aStarMeta.y), 'vStarSpectralRgb');
+  const vStarColor = varying(attribute('aStarColor', 'vec3'), 'vStarSpectralRgb');
 
   const vStarData = varying(
     Fn(() => {
@@ -134,10 +165,10 @@ export function createStarfieldLayer(catalog: StarCatalogData): StarfieldLayer {
       // Pogson flux F = 10^(-0.4 * (m - m0))
       const flux = pow(float(10.0), float(-0.4).mul(mag.sub(1.4)));
 
-      // Zoom-dependent limiting magnitude reveal (faint mag 6.5-8.0 stars emerge as FOV narrows)
+      // Zoom-dependent limiting magnitude reveal + Bortle sky quality offset
       const zoomNorm = float(1.0).sub(smoothstep(float(14.0), float(95.0), uFovDeg));
       const zoomFactor = clamp(float(75.0).div(max(uFovDeg, float(10.0))), float(0.8), float(3.8));
-      const magLimit = mix(float(6.6), float(8.35), zoomNorm);
+      const magLimit = mix(float(6.6), float(8.35), zoomNorm).add(uBortleMagShift.mul(uShowAtmosphere));
       const magVisibility = float(1.0).sub(smoothstep(magLimit.sub(0.8), magLimit.add(0.4), mag));
 
       // Suppress stars gracefully in bright daylight while preserving bright stars through twilight
@@ -259,7 +290,15 @@ export function createStarfieldLayer(catalog: StarCatalogData): StarfieldLayer {
       viewportHeight,
       pixelRatio,
       showAtmosphere,
+      bortleClass = 4,
     }) {
+      const bortleShift = showAtmosphere ? getBortleProfile(bortleClass).magShift : 0;
+      const zoomNorm = 1.0 - cpuSmoothstep(14.0, 95.0, fovDeg);
+      const effectiveMagLimit = 6.6 + (8.35 - 6.6) * zoomNorm + bortleShift;
+      const maxDrawMag =
+        showAtmosphere && sunAltDeg > 5.5 ? 1.6 : effectiveMagLimit + 0.45;
+      geometry.instanceCount = countStarsUpToMag(maxDrawMag);
+
       uEqToWorld.value.copy(eqToWorld);
       uTime.value = elapsedSec;
       uFovDeg.value = fovDeg;
@@ -270,6 +309,7 @@ export function createStarfieldLayer(catalog: StarCatalogData): StarfieldLayer {
       );
       uPixelRatio.value = pixelRatio;
       uShowAtmosphere.value = showAtmosphere ? 1.0 : 0.0;
+      uBortleMagShift.value = bortleShift;
     },
     dispose() {
       geometry.dispose();

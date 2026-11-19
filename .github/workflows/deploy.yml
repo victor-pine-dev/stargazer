@@ -12,13 +12,14 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  build_and_deploy:
+  ci:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action != 'closed')
     runs-on: ubuntu-latest
-    name: Build, Test & Deploy
+    name: Build & Test
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,8 +33,35 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit dependencies for high/critical vulnerabilities
+        run: npm audit --audit-level=high
+
       - name: Run astronomical & dataset integrity tests
         run: npm test
+
+      - name: Build production bundle
+        run: npm run build
+
+  deploy:
+    needs: ci
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    name: Deploy to Azure Static Web Apps
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Build production bundle
         run: npm run build
@@ -50,9 +78,12 @@ jobs:
           skip_app_build: true
 
   close_pull_request_job:
-    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     name: Close Pull Request Preview
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Close Pull Request
         uses: Azure/static-web-apps-deploy@v1

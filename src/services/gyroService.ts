@@ -47,6 +47,7 @@ const tempForward = new THREE.Vector3();
 const tempUp = new THREE.Vector3();
 const tempRight = new THREE.Vector3();
 const tempWorldUp = new THREE.Vector3(0, 1, 0);
+const tempHorizonUp = new THREE.Vector3();
 
 function normalizeDeg360(deg: number): number {
   return ((deg % 360) + 360) % 360;
@@ -113,8 +114,8 @@ export function deviceOrientationToSkyLook(
   let rollDeg = 0;
   if (tempRight.lengthSq() > 1e-6) {
     tempRight.normalize();
-    const horizonUp = new THREE.Vector3().crossVectors(tempRight, tempForward).normalize();
-    const cosRoll = Math.max(-1, Math.min(1, tempUp.dot(horizonUp)));
+    tempHorizonUp.crossVectors(tempRight, tempForward).normalize();
+    const cosRoll = Math.max(-1, Math.min(1, tempUp.dot(tempHorizonUp)));
     const sinRoll = tempUp.dot(tempRight);
     rollDeg = Math.atan2(sinRoll, cosRoll) * RAD_TO_DEG;
   }

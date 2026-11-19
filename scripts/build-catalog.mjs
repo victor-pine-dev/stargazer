@@ -7,7 +7,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '..');
 const OUTPUT_DIR = resolve(ROOT_DIR, 'public/data');
 
-const BASE_URL = 'https://raw.githubusercontent.com/ofrohn/d3-celestial/master/data';
+const D3_CELESTIAL_REF = process.env.D3_CELESTIAL_REF || 'master';
+const BASE_URL = `https://raw.githubusercontent.com/ofrohn/d3-celestial/${D3_CELESTIAL_REF}/data`;
 const MAX_MAGNITUDE = 8.0; // Includes all ~41,411 stars from stars.8.json (< 450 KB gzipped)
 const DEG_TO_RAD = Math.PI / 180;
 
@@ -239,6 +240,10 @@ async function main() {
     parsedStars.push({ raRad, decRad, mag, bv, hip });
   }
 
+  if (parsedStars.length < 30000) {
+    throw new Error(`Refusing to write catalog: expected >= 30000 stars, got ${parsedStars.length}`);
+  }
+
   // Sort brightest-first so GPU draw order and LOD truncation always prioritize bright stars
   parsedStars.sort((a, b) => a.mag - b.mag);
 
@@ -260,9 +265,7 @@ async function main() {
     }
   }
 
-  const starsBinPath = resolve(OUTPUT_DIR, 'stars.bin');
   const starsUint8 = new Uint8Array(starBuffer);
-  await writeFile(starsBinPath, starsUint8);
   const starsGzSize = gzipSync(starsUint8).byteLength;
 
   // 2. Build star names index for IAU proper names + bright navigational stars (Vmag <= 4.0)
@@ -288,9 +291,6 @@ async function main() {
       };
     }
   }
-
-  const starNamesPath = resolve(OUTPUT_DIR, 'star-names.json');
-  await writeFile(starNamesPath, JSON.stringify(starNamesIndex));
 
   // 3. Build 88 IAU Constellations dataset (merging split Serpens Caput / Cauda under 'Ser')
   const constMap = new Map();
@@ -330,8 +330,9 @@ async function main() {
   }
 
   const constellations = Array.from(constMap.values()).sort((a, b) => a.name.localeCompare(b.name));
-  const constellationsPath = resolve(OUTPUT_DIR, 'constellations.json');
-  await writeFile(constellationsPath, JSON.stringify(constellations));
+  if (constellations.length !== 88) {
+    throw new Error(`Refusing to write catalog: expected 88 constellations, got ${constellations.length}`);
+  }
 
   // 4. Build Deep Sky Objects (Messier M1-M110 + Caldwell C1-C109 = 219 objects) -> public/data/dso.json
   const dsoLookup = new Map();
@@ -402,9 +403,18 @@ async function main() {
     });
   }
 
+  if (dsoRecords.length < 200) {
+    throw new Error(`Refusing to write catalog: expected >= 200 DSOs, got ${dsoRecords.length}`);
+  }
+
   dsoRecords.sort((a, b) => a.mag - b.mag);
-  const dsoPath = resolve(OUTPUT_DIR, 'dso.json');
-  await writeFile(dsoPath, JSON.stringify(dsoRecords));
+
+  await Promise.all([
+    writeFile(resolve(OUTPUT_DIR, 'stars.bin'), starsUint8),
+    writeFile(resolve(OUTPUT_DIR, 'star-names.json'), JSON.stringify(starNamesIndex)),
+    writeFile(resolve(OUTPUT_DIR, 'constellations.json'), JSON.stringify(constellations)),
+    writeFile(resolve(OUTPUT_DIR, 'dso.json'), JSON.stringify(dsoRecords)),
+  ]);
 
   console.log(`Generated ${parsedStars.length} stars -> public/data/stars.bin (${(starsUint8.byteLength / 1024).toFixed(1)} KB raw, ${(starsGzSize / 1024).toFixed(1)} KB gzipped)`);
   console.log(`Generated ${Object.keys(starNamesIndex).length} named/bright stars -> public/data/star-names.json`);

@@ -502,11 +502,20 @@ export function computeRiseTransitSet(
   };
 }
 
+const solarRtsCache = new Map<string, RiseTransitSetTimes>();
+
 function computeSolarBodyRiseTransitSet(
   bodyId: SolarSystemBodyId,
   date: Date,
   location: ObserverLocation,
 ): RiseTransitSetTimes {
+  const minuteBucket = Math.floor(date.getTime() / 60_000);
+  const cacheKey = `${bodyId}:${location.latitude.toFixed(3)}:${location.longitude.toFixed(3)}:${minuteBucket}`;
+  const cached = solarRtsCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const body = ASTRONOMY_BODY_MAP[bodyId];
   const observer = new Astronomy.Observer(location.latitude, location.longitude, location.elevation);
   const localMidnight = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
@@ -518,32 +527,40 @@ function computeSolarBodyRiseTransitSet(
   const transitAltDeg = transitEvent.hor.altitude;
   const transit = formatClockHHMM(transitEvent.time.date);
 
+  let result: RiseTransitSetTimes;
   if (!riseEvent && !setEvent) {
     if (transitAltDeg > -0.5) {
-      return {
+      result = {
         rise: 'Circumpolar',
         transit,
         transitAltDeg,
         set: 'Circumpolar',
         state: 'circumpolar',
       };
+    } else {
+      result = {
+        rise: 'Never rises',
+        transit,
+        transitAltDeg,
+        set: 'Never rises',
+        state: 'never_rises',
+      };
     }
-    return {
-      rise: 'Never rises',
+  } else {
+    result = {
+      rise: riseEvent ? formatClockHHMM(riseEvent.date) : '—',
       transit,
       transitAltDeg,
-      set: 'Never rises',
-      state: 'never_rises',
+      set: setEvent ? formatClockHHMM(setEvent.date) : '—',
+      state: 'normal',
     };
   }
 
-  return {
-    rise: riseEvent ? formatClockHHMM(riseEvent.date) : '—',
-    transit,
-    transitAltDeg,
-    set: setEvent ? formatClockHHMM(setEvent.date) : '—',
-    state: 'normal',
-  };
+  if (solarRtsCache.size >= 64) {
+    solarRtsCache.clear();
+  }
+  solarRtsCache.set(cacheKey, result);
+  return result;
 }
 
 const slerpEulerFrom = new THREE.Euler(0, 0, 0, 'YXZ');

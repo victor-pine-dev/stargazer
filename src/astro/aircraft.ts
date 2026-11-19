@@ -479,39 +479,42 @@ export function propagateAircraftState(
     observer,
   );
 
-  // Build short trailing contrail (-36s to 0s)
+  // Build short trailing contrail (-36s to 0s) only when aircraft is above the horizon
+  const isAboveHorizon = currLook.altDeg > -0.5;
   const trailPoints: AircraftTrailPoint[] = [];
-  const trailOffsets = [-36, -24, -12, 0];
-  for (const offsetSec of trailOffsets) {
-    if (offsetSec === 0) {
-      trailPoints.push({
-        altDeg: currLook.altDeg,
-        azDeg: currLook.azDeg,
-        worldDir: currLook.worldDir,
-        timeOffsetSec: 0,
-      });
-    } else {
-      const ptGeo = advanceGeodeticUnclamped(
-        currGeo.latDeg,
-        currGeo.lonDeg,
-        currGeo.altitudeFt,
-        rec.groundSpeedKt,
-        rec.trackDeg,
-        rec.verticalRateFpm,
-        offsetSec,
-      );
-      const ptLook = computeAircraftLookAngles(
-        ptGeo.latDeg,
-        ptGeo.lonDeg,
-        ptGeo.altitudeFt,
-        observer,
-      );
-      trailPoints.push({
-        altDeg: ptLook.altDeg,
-        azDeg: ptLook.azDeg,
-        worldDir: ptLook.worldDir,
-        timeOffsetSec: offsetSec,
-      });
+  if (isAboveHorizon) {
+    const trailOffsets = [-36, -24, -12, 0];
+    for (const offsetSec of trailOffsets) {
+      if (offsetSec === 0) {
+        trailPoints.push({
+          altDeg: currLook.altDeg,
+          azDeg: currLook.azDeg,
+          worldDir: currLook.worldDir,
+          timeOffsetSec: 0,
+        });
+      } else {
+        const ptGeo = advanceGeodeticUnclamped(
+          currGeo.latDeg,
+          currGeo.lonDeg,
+          currGeo.altitudeFt,
+          rec.groundSpeedKt,
+          rec.trackDeg,
+          rec.verticalRateFpm,
+          offsetSec,
+        );
+        const ptLook = computeAircraftLookAngles(
+          ptGeo.latDeg,
+          ptGeo.lonDeg,
+          ptGeo.altitudeFt,
+          observer,
+        );
+        trailPoints.push({
+          altDeg: ptLook.altDeg,
+          azDeg: ptLook.azDeg,
+          worldDir: ptLook.worldDir,
+          timeOffsetSec: offsetSec,
+        });
+      }
     }
   }
 
@@ -827,6 +830,24 @@ export function generateSimulatedCorridorTraffic(
   });
 }
 
+function isValidCachedAdsbRecord(raw: unknown): raw is RawAdsbAircraftRecord {
+  if (!raw || typeof raw !== 'object') return false;
+  const r = raw as Record<string, unknown>;
+  return (
+    typeof r.hex === 'string' &&
+    typeof r.latDeg === 'number' &&
+    Number.isFinite(r.latDeg) &&
+    typeof r.lonDeg === 'number' &&
+    Number.isFinite(r.lonDeg) &&
+    typeof r.altBaroFt === 'number' &&
+    Number.isFinite(r.altBaroFt) &&
+    typeof r.groundSpeedKt === 'number' &&
+    Number.isFinite(r.groundSpeedKt) &&
+    typeof r.trackDeg === 'number' &&
+    Number.isFinite(r.trackDeg)
+  );
+}
+
 function readCachedAdsb(
   observer: ObserverLocation,
   nowMs: number,
@@ -841,7 +862,18 @@ function readCachedAdsb(
       source: AdsbSourceKind;
       records: RawAdsbAircraftRecord[];
     };
-    if (!parsed || !Array.isArray(parsed.records)) return null;
+    if (
+      !parsed ||
+      !Array.isArray(parsed.records) ||
+      typeof parsed.lat !== 'number' ||
+      !Number.isFinite(parsed.lat) ||
+      typeof parsed.lon !== 'number' ||
+      !Number.isFinite(parsed.lon) ||
+      typeof parsed.fetchedAtMs !== 'number' ||
+      !Number.isFinite(parsed.fetchedAtMs)
+    ) {
+      return null;
+    }
     if (nowMs - parsed.fetchedAtMs > ADSB_CACHE_TTL_MS) return null;
     if (
       Math.abs(parsed.lat - observer.latitude) > 0.25 ||
@@ -849,9 +881,11 @@ function readCachedAdsb(
     ) {
       return null;
     }
+    const validRecords = parsed.records.filter(isValidCachedAdsbRecord);
+    if (validRecords.length === 0) return null;
     return {
       source: 'adsb-cache',
-      records: parsed.records,
+      records: validRecords,
       fetchedAtMs: parsed.fetchedAtMs,
     };
   } catch {
@@ -903,7 +937,7 @@ export async function fetchLiveAdsbTraffic(
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5500);
+    const timer = setTimeout(() => controller.abort(), 7500);
     const res = await fetch(proxyUrl, {
       cache: 'no-store',
       signal: controller.signal,

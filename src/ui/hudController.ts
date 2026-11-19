@@ -5,6 +5,7 @@ import type {
   TourStopItem,
 } from '../astro/celestialIndex';
 import { azimuthToCardinal, formatHMS } from '../astro/coordinates';
+import { getBortleProfile } from '../astro/spectral';
 import {
   ISS_NORAD_ID,
   type SatellitePassPrediction,
@@ -36,6 +37,7 @@ import {
   searchPresetLocations,
   type ObserverLocation,
 } from '../services/locationService';
+import { buildSkyShareUrl } from '../services/urlState';
 
 let invokerPolyfillChecked = false;
 
@@ -277,6 +279,21 @@ export class HudController {
   private readonly calmExitBtn: HTMLButtonElement;
 
   private readonly labelPool = new Map<string, HTMLSpanElement>();
+  private readonly bortleSlider: HTMLInputElement;
+  private readonly bortleReadout: HTMLElement;
+  private readonly nightVisionBtn: HTMLButtonElement;
+  private readonly shareViewBtn: HTMLButtonElement;
+  private isNightVision = false;
+  private shareResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private lastClockSecondBucket = -1;
+  private lastLocalTimeStr = '';
+  private lastUtcTimeStr = '';
+  private lastIsPlaying: boolean | null = null;
+  private lastTimeMode: TimeMode | null = null;
+  private lastTimeWarp: number | null = null;
+  private lastMinutesOfDay = -1;
+  private lastBortleClass = -1;
 
   constructor(engine: SkyEngine, initialLocation: ObserverLocation) {
     this.engine = engine;
@@ -428,16 +445,65 @@ export class HudController {
     this.calmZenBtn = document.getElementById('calm-zen-btn') as HTMLButtonElement;
     this.calmExitBtn = document.getElementById('calm-exit-btn') as HTMLButtonElement;
 
+    this.bortleSlider = document.getElementById('bortle-slider') as HTMLInputElement;
+    this.bortleReadout = document.getElementById('bortle-readout')!;
+    this.nightVisionBtn = document.getElementById('night-vision-btn') as HTMLButtonElement;
+    this.shareViewBtn = document.getElementById('share-view-btn') as HTMLButtonElement;
+
     ensureModernDialogSupport(this.locationDialog);
     ensureModernDialogSupport(this.searchDialog);
     syncRangeSliderCssVars(this.timeScrubSlider);
     syncRangeSliderCssVars(this.calmVolumeSlider);
+    this.syncBortleUi(this.engine.getBortleClass());
+    this.loadSavedNightVision();
     this.syncCalmAudioUi(this.calmAudio.getState());
     this.renderLocationHeader(initialLocation);
     this.syncCustomFormInputs(initialLocation);
     this.renderPresetList('');
     this.renderSearchResults();
     this.bindUiEvents();
+  }
+
+  private setText(el: HTMLElement, next: string): void {
+    if (el.textContent !== next) {
+      el.textContent = next;
+    }
+  }
+
+  private loadSavedNightVision(): void {
+    try {
+      const saved = localStorage.getItem('stargazer.nightVision.v1');
+      if (saved === '1') {
+        this.setNightVision(true);
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  private setNightVision(enable: boolean): void {
+    this.isNightVision = enable;
+    document.body.classList.toggle('is-night-vision', enable);
+    this.nightVisionBtn.classList.toggle('is-active', enable);
+    this.nightVisionBtn.setAttribute('aria-pressed', String(enable));
+    try {
+      localStorage.setItem('stargazer.nightVision.v1', enable ? '1' : '0');
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  private syncBortleUi(bortleClass: number): void {
+    const profile = getBortleProfile(bortleClass);
+    if (this.lastBortleClass !== profile.classNumber) {
+      this.lastBortleClass = profile.classNumber;
+      if (document.activeElement !== this.bortleSlider) {
+        this.bortleSlider.value = String(profile.classNumber);
+      }
+      syncRangeSliderCssVars(this.bortleSlider);
+      this.setText(this.bortleReadout, `B${profile.classNumber} · ${profile.label}`);
+      this.bortleSlider.setAttribute('aria-valuetext', `Bortle ${profile.classNumber} — ${profile.label}`);
+    }
   }
 
   applyLocation(location: ObserverLocation): void {
@@ -702,34 +768,7 @@ export class HudController {
     });
 
     // Global Cmd/Ctrl+K shortcut to toggle Search Catalog palette, Escape to dismiss open drawer
-    window.addEventListener('keydown', (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        if (this.locationDialog.open) {
-          this.locationDialog.close();
-        }
-        if (this.searchDialog.open) {
-          this.searchDialog.close();
-        } else {
-          this.highlightedSearchIndex = 0;
-          this.renderSearchResults();
-          this.searchDialog.showModal();
-          this.celestialSearchInput.focus();
-          this.celestialSearchInput.select();
-        }
-        return;
-      }
-
-      if (e.key === 'Escape' && !this.locationDialog.open && !this.searchDialog.open) {
-        if (this.activeDrawer !== null) {
-          this.setActiveDrawer(null);
-        } else if (!this.inspectCard.hidden) {
-          this.activeTourIndex = null;
-          this.renderTourList();
-          this.engine.selectObject(null);
-        }
-      }
-    });
+    window.addEventListener('keydown', this.handleWindowKeydown);
 
     // Catalog Search filtering & keyboard navigation
     this.celestialSearchInput.addEventListener('input', () => {
@@ -952,6 +991,46 @@ export class HudController {
     this.calmZenBtn.addEventListener('click', () => {
       const current = this.engine.getCalmModeSnapshot();
       this.syncCalmModeUi(this.engine.setCalmZenHud(!current.zenHud));
+    });
+
+    // Bortle Light Pollution, Red Night Vision & Shareable View Link
+    this.bortleSlider.addEventListener('input', () => {
+      const val = Number(this.bortleSlider.value);
+      this.engine.setBortleClass(val);
+      this.syncBortleUi(val);
+      try {
+        localStorage.setItem('stargazer.bortleClass.v1', String(Math.round(val)));
+      } catch {
+        // Ignore storage errors
+      }
+    });
+
+    this.nightVisionBtn.addEventListener('click', () => {
+      this.setNightVision(!this.isNightVision);
+    });
+
+    this.shareViewBtn.addEventListener('click', async () => {
+      const shareUrl = buildSkyShareUrl(window.location.href, this.engine.getShareState());
+      let copied = false;
+      if (navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(shareUrl);
+          copied = true;
+        } catch {
+          copied = false;
+        }
+      }
+      if (!copied) {
+        window.history.replaceState(null, '', shareUrl);
+      }
+      this.shareViewBtn.textContent = copied ? 'Link Copied' : 'URL Updated';
+      if (this.shareResetTimer) {
+        clearTimeout(this.shareResetTimer);
+      }
+      this.shareResetTimer = setTimeout(() => {
+        this.shareViewBtn.textContent = 'Share View';
+        this.shareResetTimer = null;
+      }, 2000);
     });
   }
 
@@ -1477,17 +1556,21 @@ export class HudController {
 
   updateTelemetry(snapshot: TelemetrySnapshot): void {
     this.lastSunAltDeg = snapshot.sun.altDeg;
-    this.gpuBadge.textContent = snapshot.backendLabel;
-    this.starCountLabel.textContent = `${snapshot.starCount.toLocaleString()} stars · ${snapshot.dsoCount} DSOs`;
-    this.fpsLabel.textContent = `${snapshot.fps} FPS`;
+    this.setText(this.gpuBadge, snapshot.backendLabel);
+    this.setText(this.starCountLabel, `${snapshot.starCount.toLocaleString()} stars · ${snapshot.dsoCount} DSOs`);
+    this.setText(this.fpsLabel, `${snapshot.fps} FPS`);
 
-    const utcStr = snapshot.observedDate.toISOString().slice(11, 19);
-    const localStr = snapshot.observedDate.toLocaleTimeString([], {
-      hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
+    const secondBucket = Math.floor(snapshot.observedDate.getTime() / 1000);
+    if (secondBucket !== this.lastClockSecondBucket) {
+      this.lastClockSecondBucket = secondBucket;
+      this.lastUtcTimeStr = snapshot.observedDate.toISOString().slice(11, 19);
+      this.lastLocalTimeStr = snapshot.observedDate.toLocaleTimeString([], {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    }
     const speedTag = !snapshot.isPlaying
       ? 'PAUSED'
       : snapshot.timeWarpMultiplier !== 1
@@ -1496,34 +1579,52 @@ export class HudController {
           ? ''
           : snapshot.timeMode.toUpperCase();
 
-    this.clockReadout.textContent = speedTag ? `${localStr} · ${speedTag}` : localStr;
-    this.utcReadout.textContent = `${utcStr} UTC · ${speedTag || 'LIVE'}`;
+    this.setText(this.clockReadout, speedTag ? `${this.lastLocalTimeStr} · ${speedTag}` : this.lastLocalTimeStr);
+    this.setText(this.utcReadout, `${this.lastUtcTimeStr} UTC · ${speedTag || 'LIVE'}`);
 
-    this.lastReadout.textContent = formatHMS(snapshot.lastRad, true);
-    this.sunReadout.textContent = `${snapshot.sun.twilightPhase} (${snapshot.sun.altDeg >= 0 ? '+' : ''}${snapshot.sun.altDeg.toFixed(1)}°)`;
-    this.moonReadout.textContent = `${snapshot.moon.phaseName} (${Math.round(snapshot.moon.phaseFraction * 100)}%)`;
+    this.setText(this.lastReadout, formatHMS(snapshot.lastRad, true));
+    this.setText(
+      this.sunReadout,
+      `${snapshot.sun.twilightPhase} (${snapshot.sun.altDeg >= 0 ? '+' : ''}${snapshot.sun.altDeg.toFixed(1)}°)`,
+    );
+    this.setText(
+      this.moonReadout,
+      `${snapshot.moon.phaseName} (${Math.round(snapshot.moon.phaseFraction * 100)}%)`,
+    );
 
-    // Sync Time Machine controls
-    this.timePlayPauseBtn.textContent = snapshot.isPlaying ? 'Pause' : 'Play';
-    this.timePlayPauseBtn.classList.toggle('is-active', snapshot.isPlaying);
-    this.timePlayPauseBtn.setAttribute('aria-label', snapshot.isPlaying ? 'Pause simulation' : 'Play simulation');
+    // Sync Time Machine controls only when state changes
+    if (snapshot.isPlaying !== this.lastIsPlaying) {
+      this.lastIsPlaying = snapshot.isPlaying;
+      this.timePlayPauseBtn.textContent = snapshot.isPlaying ? 'Pause' : 'Play';
+      this.timePlayPauseBtn.classList.toggle('is-active', snapshot.isPlaying);
+      this.timePlayPauseBtn.setAttribute('aria-label', snapshot.isPlaying ? 'Pause simulation' : 'Play simulation');
+    }
 
-    this.timeModeButtons.forEach((btn) => {
-      btn.classList.toggle('is-active', btn.dataset.timeMode === snapshot.timeMode);
-    });
+    if (snapshot.timeMode !== this.lastTimeMode) {
+      this.lastTimeMode = snapshot.timeMode;
+      this.timeModeButtons.forEach((btn) => {
+        btn.classList.toggle('is-active', btn.dataset.timeMode === snapshot.timeMode);
+      });
+    }
 
-    this.timeWarpButtons.forEach((btn) => {
-      const warp = Number(btn.dataset.timeWarp ?? 1);
-      btn.classList.toggle('is-active', warp === snapshot.timeWarpMultiplier);
-    });
+    if (snapshot.timeWarpMultiplier !== this.lastTimeWarp) {
+      this.lastTimeWarp = snapshot.timeWarpMultiplier;
+      this.timeWarpButtons.forEach((btn) => {
+        const warp = Number(btn.dataset.timeWarp ?? 1);
+        btn.classList.toggle('is-active', warp === snapshot.timeWarpMultiplier);
+      });
+    }
 
     if (!this.isScrubbingTime && document.activeElement !== this.timeScrubSlider) {
       const minutesOfDay = snapshot.observedDate.getHours() * 60 + snapshot.observedDate.getMinutes();
-      this.timeScrubSlider.value = String(minutesOfDay);
-      syncRangeSliderCssVars(this.timeScrubSlider);
-      const hhmm = formatMinutesHHMM(minutesOfDay);
-      this.timeScrubReadout.textContent = hhmm;
-      this.timeScrubSlider.setAttribute('aria-valuetext', `${hhmm} local time`);
+      if (minutesOfDay !== this.lastMinutesOfDay) {
+        this.lastMinutesOfDay = minutesOfDay;
+        this.timeScrubSlider.value = String(minutesOfDay);
+        syncRangeSliderCssVars(this.timeScrubSlider);
+        const hhmm = formatMinutesHHMM(minutesOfDay);
+        this.setText(this.timeScrubReadout, hhmm);
+        this.timeScrubSlider.setAttribute('aria-valuetext', `${hhmm} local time`);
+      }
     }
 
     if (document.activeElement !== this.timeDatetimeInput) {
@@ -1533,16 +1634,18 @@ export class HudController {
       }
     }
 
+    this.syncBortleUi(snapshot.bortleClass);
+
     const cardinal = azimuthToCardinal(snapshot.azDeg);
     const azText = `${snapshot.azDeg.toFixed(1)}° ${cardinal}`;
     const altText = `${snapshot.altDeg >= 0 ? '+' : ''}${snapshot.altDeg.toFixed(1)}°`;
     const fovText = `${Math.round(snapshot.fovDeg)}°`;
-    this.azReadout.textContent = azText;
-    this.altReadout.textContent = altText;
-    this.fovReadout.textContent = fovText;
-    this.layersAzReadout.textContent = azText;
-    this.layersAltReadout.textContent = altText;
-    this.layersFovReadout.textContent = fovText;
+    this.setText(this.azReadout, azText);
+    this.setText(this.altReadout, altText);
+    this.setText(this.fovReadout, fovText);
+    this.setText(this.layersAzReadout, azText);
+    this.setText(this.layersAltReadout, altText);
+    this.setText(this.layersFovReadout, fovText);
 
     this.updateSelectedObject(
       snapshot.selectedObject,
@@ -1736,6 +1839,100 @@ export class HudController {
     }
   }
 
+  private readonly handleWindowKeydown = (e: KeyboardEvent): void => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      if (this.locationDialog.open) {
+        this.locationDialog.close();
+      }
+      if (this.searchDialog.open) {
+        this.searchDialog.close();
+      } else {
+        this.highlightedSearchIndex = 0;
+        this.renderSearchResults();
+        this.searchDialog.showModal();
+        this.celestialSearchInput.focus();
+        this.celestialSearchInput.select();
+      }
+      return;
+    }
+
+    if (this.locationDialog.open || this.searchDialog.open) {
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      if (this.activeDrawer !== null) {
+        this.setActiveDrawer(null);
+      } else if (!this.inspectCard.hidden) {
+        this.activeTourIndex = null;
+        this.renderTourList();
+        this.engine.selectObject(null);
+      }
+      return;
+    }
+
+    const activeTag = (e.target as HTMLElement | null)?.tagName;
+    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') {
+      return;
+    }
+
+    const fov = this.engine.getShareState().fovDeg;
+    const stepDeg = Math.max(1.5, fov * 0.08);
+    switch (e.key) {
+      case 'ArrowLeft':
+        e.preventDefault();
+        this.engine.panBy(-stepDeg, 0);
+        return;
+      case 'ArrowRight':
+        e.preventDefault();
+        this.engine.panBy(stepDeg, 0);
+        return;
+      case 'ArrowUp':
+        e.preventDefault();
+        this.engine.panBy(0, stepDeg);
+        return;
+      case 'ArrowDown':
+        e.preventDefault();
+        this.engine.panBy(0, -stepDeg);
+        return;
+      case '+':
+      case '=':
+        e.preventDefault();
+        this.engine.zoomBy(-8);
+        return;
+      case '-':
+      case '_':
+        e.preventDefault();
+        this.engine.zoomBy(8);
+        return;
+      case ' ':
+        if (activeTag !== 'BUTTON' && activeTag !== 'SUMMARY') {
+          e.preventDefault();
+          this.engine.togglePlaying();
+        }
+        return;
+      case 'r':
+      case 'R':
+        if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          this.setNightVision(!this.isNightVision);
+        }
+        return;
+      default:
+        return;
+    }
+  };
+
+  dispose(): void {
+    window.removeEventListener('keydown', this.handleWindowKeydown);
+    if (this.shareResetTimer) {
+      clearTimeout(this.shareResetTimer);
+      this.shareResetTimer = null;
+    }
+    this.calmAudio.dispose();
+  }
+
   private renderProjectedLabels(items: ScreenLabelItem[]): void {
     const activeIds = new Set<string>();
 
@@ -1751,8 +1948,7 @@ export class HudController {
       } else if (el.textContent !== item.text) {
         el.textContent = item.text;
       }
-      el.style.left = `${item.x.toFixed(1)}px`;
-      el.style.top = `${item.y.toFixed(1)}px`;
+      el.style.transform = `translate3d(${item.x.toFixed(1)}px, ${item.y.toFixed(1)}px, 0) translate(var(--label-offset-x, -50%), var(--label-offset-y, -50%))`;
     }
 
     for (const [id, el] of this.labelPool.entries()) {

@@ -21,7 +21,12 @@ const SKY_DOME_RADIUS = 520;
 
 export interface AtmosphereDomeLayer {
   mesh: THREE.Mesh;
-  update: (sunWorldDir: [number, number, number], sunAltDeg: number, visibleAtmosphere: boolean) => void;
+  update: (
+    sunWorldDir: [number, number, number],
+    sunAltDeg: number,
+    visibleAtmosphere: boolean,
+    bortleSkyglow?: number,
+  ) => void;
   dispose: () => void;
 }
 
@@ -34,6 +39,7 @@ export function createAtmosphereDome(): AtmosphereDomeLayer {
   const uSunDir = uniform(new THREE.Vector3(0, -1, 0));
   const uSunAltDeg = uniform(-30);
   const uShowAtmosphere = uniform(1.0);
+  const uSkyglow = uniform(0.32);
 
   const vRayDir = varying(normalize(positionLocal), 'vAtmoRayDir');
 
@@ -89,11 +95,17 @@ export function createAtmosphereDome(): AtmosphereDomeLayer {
     const twiColor = mix(twiZenith, twiHorizonBand, pow(horizonProximity, float(0.75)))
       .add(vec3(1.0, 0.45, 0.16).mul(miePhase).mul(0.55).mul(horizonProximity.add(0.25)));
 
-    // 3. Astronomical Night sky (deep obsidian-cobalt zenith + faint horizon airglow)
+    // 3. Astronomical Night sky (deep obsidian-cobalt zenith + Bortle skyglow + horizon airglow)
     const nightZenith = vec3(0.0025, 0.0045, 0.013);
     const nightHorizon = vec3(0.012, 0.021, 0.042);
+    const bortleGlow = mix(
+      vec3(0.015, 0.018, 0.028),
+      vec3(0.062, 0.052, 0.036),
+      pow(horizonProximity, float(0.85)),
+    ).mul(uSkyglow);
     const nightColor = mix(nightZenith, nightHorizon, pow(horizonProximity, float(1.1)))
-      .add(vec3(0.006, 0.01, 0.02).mul(exp(opticalDepth.mul(-0.18))));
+      .add(vec3(0.006, 0.01, 0.02).mul(exp(opticalDepth.mul(-0.18))))
+      .add(bortleGlow);
 
     const skyAbove = dayColor.mul(dayWeight).add(twiColor.mul(twilightPeak)).add(nightColor.mul(nightWeight));
 
@@ -131,10 +143,11 @@ export function createAtmosphereDome(): AtmosphereDomeLayer {
 
   return {
     mesh,
-    update(sunWorldDir, sunAltDeg, visibleAtmosphere) {
+    update(sunWorldDir, sunAltDeg, visibleAtmosphere, bortleSkyglow = 0.32) {
       uSunDir.value.set(sunWorldDir[0], sunWorldDir[1], sunWorldDir[2]).normalize();
       uSunAltDeg.value = sunAltDeg;
       uShowAtmosphere.value = visibleAtmosphere ? 1.0 : 0.0;
+      uSkyglow.value = visibleAtmosphere ? bortleSkyglow : 0.0;
     },
     dispose() {
       geometry.dispose();

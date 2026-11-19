@@ -100,6 +100,10 @@ li {
 
 .sky-label {
   position: absolute;
+  left: 0;
+  top: 0;
+  --label-offset-x: -50%;
+  --label-offset-y: -50%;
   transform: translate(-50%, -50%);
   white-space: nowrap;
   line-height: 1;
@@ -115,6 +119,7 @@ li {
 }
 
 .sky-label-star {
+  --label-offset-x: 0%;
   transform: translate(0, -50%);
   font-size: 11px;
   font-weight: 500;
@@ -122,6 +127,7 @@ li {
 }
 
 .sky-label-planet {
+  --label-offset-x: 0%;
   transform: translate(0, -50%);
   font-size: 11px;
   font-weight: 600;
@@ -130,6 +136,7 @@ li {
 }
 
 .sky-label-dso {
+  --label-offset-x: 0%;
   transform: translate(0, -50%);
   font-size: 10px;
   font-weight: 500;
@@ -138,6 +145,7 @@ li {
 }
 
 .sky-label-satellite {
+  --label-offset-x: 0%;
   transform: translate(0, -50%);
   font-size: 10.5px;
   font-weight: 600;
@@ -147,6 +155,7 @@ li {
 }
 
 .sky-label-aircraft {
+  --label-offset-x: 0%;
   transform: translate(0, -50%);
   font-size: 10.5px;
   font-weight: 600;
@@ -1862,4 +1871,53 @@ body.is-hud-minimized .calm-hud-banner {
   .layers-panel-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+/* Bortle Sky Conditions & Red Night-Vision Field Mode */
+.bortle-control-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bortle-slider {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+.bortle-readout {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.field-actions-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+body.is-night-vision {
+  --bg-deep: #090101;
+  --glass-bg: rgba(24, 3, 3, 0.84);
+  --glass-bg-hover: rgba(42, 6, 6, 0.92);
+  --glass-border: rgba(239, 68, 68, 0.32);
+  --glass-border-strong: rgba(248, 113, 113, 0.62);
+  --text-primary: #fecaca;
+  --text-secondary: #f87171;
+  --text-muted: #b91c1c;
+  --accent: #ef4444;
+  --accent-soft: rgba(239, 68, 68, 0.22);
+  --amber: #ef4444;
+  --emerald: #f87171;
+}
+
+body.is-night-vision #sky-canvas {
+  filter: sepia(1) hue-rotate(-52deg) saturate(4.2) brightness(0.72) contrast(1.06);
+}
+
+body.is-night-vision .sky-label,
+body.is-night-vision .sky-label-compass {
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.4);
 }

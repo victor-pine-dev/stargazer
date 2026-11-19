@@ -35,6 +35,10 @@ const MAX_AIRCRAFT = 48;
 const MAX_CONTRAIL_VERTICES = 384;
 const MAX_ARC_VERTICES = 256;
 
+const selectedBaseColor = new THREE.Color();
+const selectedFutureColor = new THREE.Color();
+const whiteColor = new THREE.Color('#ffffff');
+
 export interface AircraftLayer {
   group: THREE.Group;
   update: (params: {
@@ -471,8 +475,8 @@ export function createAircraftLayer(): AircraftLayer {
       let arcVertexCount = 0;
       const selectedAc = selectedHex ? aircraft.find((a) => a.hex === selectedHex) : undefined;
       if (selectedAc && selectedArc.length >= 2) {
-        const baseColor = new THREE.Color(selectedAc.colorHex);
-        const futureColor = baseColor.clone().lerp(new THREE.Color('#ffffff'), 0.35);
+        selectedBaseColor.set(selectedAc.colorHex);
+        selectedFutureColor.copy(selectedBaseColor).lerp(whiteColor, 0.35);
         const maxArcSegs = Math.floor(MAX_ARC_VERTICES / 2);
 
         for (let i = 0; i < selectedArc.length - 1 && arcVertexCount / 2 < maxArcSegs; i++) {
@@ -493,7 +497,7 @@ export function createAircraftLayer(): AircraftLayer {
 
           const writePt = (idx: number, pt: AircraftTrackPoint) => {
             const isFuture = pt.timeOffsetSec >= 0;
-            const c = isFuture ? futureColor : baseColor;
+            const c = isFuture ? selectedFutureColor : selectedBaseColor;
             selectedArcLine.colors[idx * 3] = c.r;
             selectedArcLine.colors[idx * 3 + 1] = c.g;
             selectedArcLine.colors[idx * 3 + 2] = c.b;

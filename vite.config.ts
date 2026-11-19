@@ -49,16 +49,42 @@ function handleAircraftProxyMiddleware(
       res.setHeader('Cache-Control', 'public, max-age=4');
       res.end(JSON.stringify(payload));
     })
-    .catch((err) => {
+    .catch(() => {
       res.statusCode = 502;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Cache-Control', 'no-store');
       res.end(
         JSON.stringify({
-          error: err instanceof Error ? err.message : 'Unable to reach open ADS-B providers.',
+          error: 'Unable to reach open ADS-B providers.',
         }),
       );
     });
+}
+
+const VIRTUAL_SAT_WASM_STUB = '\0virtual:satellite-wasm-stub';
+
+function stripSatelliteWasmPlugin(): Plugin {
+  return {
+    name: 'strip-satellite-wasm',
+    enforce: 'pre',
+    resolveId(id, importer) {
+      if (
+        id === '#wasm-single-thread' ||
+        id === '#wasm-multi-thread' ||
+        (importer?.includes('satellite.js') &&
+          (id === './wasm/index.js' || id.endsWith('/wasm/index.js')))
+      ) {
+        return VIRTUAL_SAT_WASM_STUB;
+      }
+      return null;
+    },
+    load(id) {
+      if (id === VIRTUAL_SAT_WASM_STUB) {
+        return 'export {};';
+      }
+      return null;
+    },
+  };
 }
 
 function stargazerAdsbProxyPlugin(): Plugin {
@@ -74,7 +100,7 @@ function stargazerAdsbProxyPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [stargazerAdsbProxyPlugin()],
+  plugins: [stargazerAdsbProxyPlugin(), stripSatelliteWasmPlugin()],
   optimizeDeps: {
     esbuildOptions: {
       target: 'esnext',
@@ -82,10 +108,27 @@ export default defineConfig({
   },
   worker: {
     format: 'es',
+    plugins: () => [stripSatelliteWasmPlugin()],
   },
   build: {
     target: 'esnext',
-    chunkSizeWarningLimit: 1200,
+    chunkSizeWarningLimit: 850,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/three')) {
+            return 'vendor-three';
+          }
+          if (
+            id.includes('node_modules/astronomy-engine') ||
+            id.includes('node_modules/satellite.js')
+          ) {
+            return 'vendor-astro';
+          }
+          return undefined;
+        },
+      },
+    },
   },
   server: {
     port: 5173,

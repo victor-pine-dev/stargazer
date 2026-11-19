@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 // @ts-expect-error jsdom does not ship TypeScript declarations in devDependencies
 import { JSDOM } from 'jsdom';
@@ -16,7 +17,8 @@ import {
   worldVectorToAltAz,
 } from '../coordinates';
 import { classifyLunarPhase, computeSolarSystemEphemeris } from '../solarSystem';
-import { bvToKelvin, bvToRGB, computeAirmass, magnitudeToFlux } from '../spectral';
+import { bvToKelvin, bvToRGB, computeAirmass, getBortleProfile, magnitudeToFlux } from '../spectral';
+import { buildSkyShareUrl, parseSkyUrlParams } from '../../services/urlState';
 import {
   buildTonightsBestTour,
   bvToSpectralClass,
@@ -31,6 +33,7 @@ import { DEFAULT_LOCATION } from '../../services/locationService';
 import {
   computeSatelliteOrbitArc,
   DEFAULT_SATELLITE_TLES,
+  fetchLiveCelesTrakTles,
   ISS_NORAD_ID,
   mergeTleUpdates,
   parseThreeLineTleText,
@@ -43,6 +46,7 @@ import {
   computeAircraftLookAngles,
   computeAircraftSkyArc,
   extrapolateAircraftGeodetic,
+  fetchLiveAdsbTraffic,
   generateSimulatedCorridorTraffic,
   parseOpenSkyResponse,
   parseReadsbResponse,
@@ -1238,6 +1242,7 @@ describe('Phase 7 Calm Mode: Meteor Physics & Soundscape State', () => {
       else Reflect.deleteProperty(globalThis, 'navigator');
     }
   });
+
   it('synthesizes distortion-free campfire bed, crackle, wood-pop, and soft-limiter DSP buffers', () => {
     const computeMetrics = (samples: Float32Array) => {
       let sum = 0;
@@ -1507,9 +1512,352 @@ describe('HUD Simplification & Mobile-First DOM Structure', () => {
       'layers-fov-readout',
       'layers-zoom-in-btn',
       'layers-zoom-out-btn',
+      'bortle-slider',
+      'night-vision-btn',
+      'share-view-btn',
+      'context-reload-btn',
       'utc-readout',
     ]) {
       expect(doc.getElementById(controlId), `#${controlId} must exist`).not.toBeNull();
     }
+  });
+});
+
+describe('Security Hardening, /api/aircraft Proxy & Cache Validation', () => {
+  const require = createRequire(import.meta.url);
+  const adsbProxy = require('../../../api/shared/adsbProxy.cjs') as {
+    parseQueryParams: (
+      lat: string | null,
+      lon: string | null,
+      radius: string | null,
+    ) => { lat: number; lon: number; radius: number } | { error: string };
+    normalizeReadsbList: (items: unknown[], fetchedAtMs: number) => Array<Record<string, unknown>>;
+    normalizeOpenSkyPayload: (payload: unknown, fetchedAtMs: number) => Array<Record<string, unknown>>;
+    fetchNormalizedAdsb: (
+      lat: number,
+      lon: number,
+      radiusNm: number,
+    ) => Promise<{ source: string; fetchedAtMs: number; aircraft: Array<Record<string, unknown>> }>;
+    buildGeoBucketKey: (
+      lat: number,
+      lon: number,
+      radiusNm: number,
+    ) => { key: string; qLat: number; qLon: number; qRad: number };
+    clearAdsbProxyCache: () => void;
+  };
+
+  it('configures defense-in-depth global security headers in public/staticwebapp.config.json', () => {
+    const configPath = resolve(process.cwd(), 'public/staticwebapp.config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as {
+      globalHeaders?: Record<string, string>;
+    };
+    const headers = config.globalHeaders ?? {};
+
+    expect(headers['X-Content-Type-Options']).toBe('nosniff');
+    expect(headers['X-Frame-Options']).toBe('DENY');
+    expect(headers['Strict-Transport-Security']).toContain('max-age=31536000');
+    expect(headers['Permissions-Policy']).toContain('geolocation=(self)');
+    expect(headers['Permissions-Policy']).toContain('camera=()');
+    expect(headers['Content-Security-Policy']).toContain("default-src 'self'");
+    expect(headers['Content-Security-Policy']).toContain("media-src 'self' data:");
+    expect(headers['Content-Security-Policy']).toContain("frame-ancestors 'none'");
+  });
+
+  it('validates queries, filters grounded craft, and caps normalized ADS-B responses at 160 aircraft', () => {
+    expect('error' in adsbProxy.parseQueryParams('95', '-74', '50')).toBe(true);
+    expect('error' in adsbProxy.parseQueryParams('40', '200', '50')).toBe(true);
+    const valid = adsbProxy.parseQueryParams('40.7128', '-74.006', '999');
+    expect(valid).toEqual({ lat: 40.7128, lon: -74.006, radius: 150 });
+
+    const nowMs = Date.UTC(2026, 10, 15, 18, 0, 0);
+    const oversizedReadsb = Array.from({ length: 210 }, (_, idx) => ({
+      hex: `abc${idx.toString(16).padStart(3, '0')}`,
+      flight: `FLT${idx}`,
+      alt_baro: idx === 0 ? 'ground' : 30000,
+      lat: 40.7 + idx * 0.001,
+      lon: -74.0 - idx * 0.001,
+      gs: 450,
+      track: 90,
+    }));
+    const normalizedReadsb = adsbProxy.normalizeReadsbList(oversizedReadsb, nowMs);
+    expect(normalizedReadsb.length).toBe(160);
+    expect(normalizedReadsb.some((a) => a.callsign === 'FLT0')).toBe(false);
+
+    const oversizedOpenSky = {
+      states: Array.from({ length: 205 }, (_, idx) => [
+        `sky${idx.toString(16).padStart(3, '0')}`,
+        `SKY${idx} `,
+        'United States',
+        Math.floor(nowMs / 1000),
+        Math.floor(nowMs / 1000),
+        -74.0 - idx * 0.001,
+        40.7 + idx * 0.001,
+        9000,
+        idx === 0, // first is on_ground
+        220,
+        180,
+        0,
+        null,
+        9100,
+        '1200',
+        false,
+        0,
+      ]),
+    };
+    const normalizedSky = adsbProxy.normalizeOpenSkyPayload(oversizedOpenSky, nowMs);
+    expect(normalizedSky.length).toBe(160);
+    expect(normalizedSky.some((a) => a.callsign === 'SKY0')).toBe(false);
+  });
+
+  it('fails over across upstream ADS-B providers and rejects oversized payloads in fetchNormalizedAdsb', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes('adsb.fi')) {
+        return {
+          ok: true,
+          headers: { get: (k: string) => (k.toLowerCase() === 'content-length' ? String(3 * 1024 * 1024) : null) },
+          text: async () => '{}',
+        };
+      }
+      if (url.includes('adsb.lol')) {
+        return {
+          ok: true,
+          headers: { get: () => null },
+          text: async () =>
+            JSON.stringify({
+              ac: [
+                {
+                  hex: 'a12345',
+                  flight: 'DAL100 ',
+                  alt_baro: 32000,
+                  lat: 40.75,
+                  lon: -73.95,
+                  gs: 460,
+                  track: 45,
+                },
+              ],
+            }),
+        };
+      }
+      return { ok: false, status: 503 };
+    });
+
+    adsbProxy.clearAdsbProxyCache();
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const result = await adsbProxy.fetchNormalizedAdsb(40.7128, -74.006, 65);
+      expect(result.source).toBe('adsb.lol');
+      expect(result.aircraft.length).toBe(1);
+      expect(result.aircraft[0].callsign).toBe('DAL100');
+    } finally {
+      adsbProxy.clearAdsbProxyCache();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('safely ignores corrupted localStorage entries in TLE and ADS-B caches without producing NaN coordinates', async () => {
+    const store = new Map<string, string>();
+    const mockStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        store.set(k, v);
+      },
+      removeItem: (k: string) => {
+        store.delete(k);
+      },
+    };
+    const origStorageDesc = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: mockStorage,
+    });
+
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new Error('offline');
+    }));
+
+    try {
+      // 1. Corrupt TLE cache entries -> falls back cleanly to embedded TLEs
+      store.set(
+        'stargazer.tleCache.v1',
+        JSON.stringify({
+          fetchedAtMs: Date.now(),
+          records: [
+            { noradId: 'bad', id: 123, name: null },
+            { noradId: NaN, id: 'sat-nan', name: 'Bad', line1: '1', line2: '2', baseMag: 0 },
+          ],
+        }),
+      );
+      const tleRes = await fetchLiveCelesTrakTles(false);
+      expect(tleRes.source).toBe('embedded');
+      expect(tleRes.records.length).toBe(DEFAULT_SATELLITE_TLES.length);
+
+      // 2. Corrupt ADS-B cache entries -> ignores bad entries and uses simulated corridor without NaN
+      const nycLoc = {
+        ...DEFAULT_LOCATION,
+        latitude: 40.7128,
+        longitude: -74.006,
+        elevation: 10,
+      };
+      store.set(
+        'stargazer.adsbCache.v1',
+        JSON.stringify({
+          lat: nycLoc.latitude,
+          lon: nycLoc.longitude,
+          fetchedAtMs: Date.now(),
+          source: 'adsb-fi',
+          records: [
+            { hex: 123, latDeg: 'not-a-number', lonDeg: -74 },
+            { hex: 'bad-lat', latDeg: NaN, lonDeg: -74, altBaroFt: 30000, groundSpeedKt: 400, trackDeg: 90 },
+          ],
+        }),
+      );
+      const adsbRes = await fetchLiveAdsbTraffic(nycLoc);
+      expect(adsbRes.source).toBe('simulated-corridor');
+      expect(adsbRes.records.every((r) => Number.isFinite(r.latDeg) && Number.isFinite(r.lonDeg))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      if (origStorageDesc) Object.defineProperty(globalThis, 'localStorage', origStorageDesc);
+      else Reflect.deleteProperty(globalThis, 'localStorage');
+    }
+  });
+});
+
+describe('Bortle Scale, Proxy Coalescing, Deep Links & Offline PWA', () => {
+  const require = createRequire(import.meta.url);
+  const adsbProxy = require('../../../api/shared/adsbProxy.cjs') as {
+    fetchNormalizedAdsb: (
+      lat: number,
+      lon: number,
+      radiusNm: number,
+    ) => Promise<{ source: string; fetchedAtMs: number; aircraft: Array<Record<string, unknown>> }>;
+    buildGeoBucketKey: (
+      lat: number,
+      lon: number,
+      radiusNm: number,
+    ) => { key: string; qLat: number; qLon: number; qRad: number };
+    clearAdsbProxyCache: () => void;
+  };
+
+  it('evaluates Bortle dark-sky classes [1..9] with clamping and monotonic skyglow / limiting mag shifts', () => {
+    const lowClamp = getBortleProfile(-3);
+    const highClamp = getBortleProfile(99);
+    const nanFallback = getBortleProfile(Number.NaN);
+    expect(lowClamp.classNumber).toBe(1);
+    expect(highClamp.classNumber).toBe(9);
+    expect(nanFallback.classNumber).toBe(4);
+
+    for (let c = 1; c < 9; c++) {
+      const curr = getBortleProfile(c);
+      const next = getBortleProfile(c + 1);
+      expect(next.skyglowIntensity).toBeGreaterThan(curr.skyglowIntensity);
+      expect(next.magShift).toBeLessThan(curr.magShift);
+    }
+  });
+
+  it('coalesces concurrent nearby ADS-B proxy requests into a single geo-bucketed upstream fetch', async () => {
+    adsbProxy.clearAdsbProxyCache();
+    expect(adsbProxy.buildGeoBucketKey(40.7128, -74.006, 65).key).toBe(
+      adsbProxy.buildGeoBucketKey(40.7145, -74.007, 65).key,
+    );
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => null },
+      text: async () =>
+        JSON.stringify({
+          aircraft: [
+            {
+              hex: 'b00001',
+              flight: 'JBU123',
+              alt_baro: 28000,
+              lat: 40.72,
+              lon: -74.01,
+              gs: 420,
+              track: 120,
+            },
+          ],
+        }),
+    }));
+
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const [r1, r2] = await Promise.all([
+        adsbProxy.fetchNormalizedAdsb(40.7128, -74.006, 65),
+        adsbProxy.fetchNormalizedAdsb(40.7145, -74.007, 65),
+      ]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(r1).toEqual(r2);
+
+      // Subsequent call hits 6s TTL cache without calling fetch again
+      const r3 = await adsbProxy.fetchNormalizedAdsb(40.713, -74.005, 65);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(r3.aircraft.length).toBe(1);
+
+      adsbProxy.clearAdsbProxyCache();
+      await adsbProxy.fetchNormalizedAdsb(40.713, -74.005, 65);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      adsbProxy.clearAdsbProxyCache();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('round-trips valid shareable sky URL state and rejects out-of-range query params', () => {
+    const shareUrl = buildSkyShareUrl('https://stargazer.example.com/', {
+      lat: 19.8207,
+      lon: -155.4681,
+      timestampMs: Date.UTC(2026, 10, 18, 22, 15, 0),
+      azDeg: 214.5,
+      altDeg: 41.2,
+      fovDeg: 38,
+      bortleClass: 1,
+      target: 'Jupiter',
+    });
+
+    const parsed = parseSkyUrlParams(new URL(shareUrl).search);
+    expect(parsed.lat).toBeCloseTo(19.8207, 4);
+    expect(parsed.lon).toBeCloseTo(-155.4681, 4);
+    expect(parsed.timestampMs).toBe(Date.UTC(2026, 10, 18, 22, 15, 0));
+    expect(parsed.azDeg).toBeCloseTo(214.5, 1);
+    expect(parsed.altDeg).toBeCloseTo(41.2, 1);
+    expect(parsed.fovDeg).toBe(38);
+    expect(parsed.bortleClass).toBe(1);
+    expect(parsed.target).toBe('Jupiter');
+
+    const bad = parseSkyUrlParams('?lat=999&lon=NaN&fov=5&alt=-120&bortle=42&t=not-a-date');
+    expect(bad.lat).toBeUndefined();
+    expect(bad.lon).toBeUndefined();
+    expect(bad.fovDeg).toBeUndefined();
+    expect(bad.altDeg).toBeUndefined();
+    expect(bad.bortleClass).toBeUndefined();
+    expect(bad.timestampMs).toBeUndefined();
+  });
+
+  it('ships valid offline PWA assets and Azure static webapp service worker cache rules', () => {
+    const repoRoot = resolve(process.cwd());
+    const manifest = JSON.parse(readFileSync(resolve(repoRoot, 'public/manifest.webmanifest'), 'utf8')) as {
+      name: string;
+      display: string;
+      icons: Array<{ src: string }>;
+    };
+    expect(manifest.display).toBe('standalone');
+    expect(manifest.icons[0]?.src).toBe('/icon.svg');
+
+    const iconSvg = readFileSync(resolve(repoRoot, 'public/icon.svg'), 'utf8');
+    expect(iconSvg).toContain('<svg');
+
+    const swCode = readFileSync(resolve(repoRoot, 'public/sw.js'), 'utf8');
+    expect(swCode).toContain('/data/stars.bin?v=1');
+    expect(swCode).toContain("startsWith('/api/')");
+
+    const swaConfig = JSON.parse(readFileSync(resolve(repoRoot, 'public/staticwebapp.config.json'), 'utf8')) as {
+      routes: Array<{ route: string; headers?: Record<string, string> }>;
+      mimeTypes?: Record<string, string>;
+      navigationFallback?: { exclude?: string[] };
+    };
+    const swRoute = swaConfig.routes.find((r) => r.route === '/sw.js');
+    expect(swRoute?.headers?.['Cache-Control']).toBe('no-cache');
+    expect(swaConfig.mimeTypes?.['.webmanifest']).toBe('application/manifest+json');
+    expect(swaConfig.navigationFallback?.exclude).toContain('/sw.js');
   });
 });

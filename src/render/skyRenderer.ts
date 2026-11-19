@@ -44,9 +44,11 @@ import {
   type EvaluatedMeteorState,
   type MeteorRateMode,
 } from '../astro/meteors';
+import { getBortleProfile } from '../astro/spectral';
 import type { LoadedCelestialData } from '../data/catalogLoader';
 import { GyroSensorController, type GyroControllerState } from '../services/gyroService';
 import type { ObserverLocation } from '../services/locationService';
+import type { SkyShareableState } from '../services/urlState';
 import { AC_SPHERE_RADIUS, createAircraftLayer } from './aircraftLayer';
 import { createAtmosphereDome } from './atmosphereDome';
 import { createCampfireLayer } from './campfireLayer';
@@ -55,12 +57,15 @@ import { createConstellationLayer, type ScreenLabelItem } from './constellationL
 import { createDsoLayer } from './dsoLayer';
 import { createMeteorLayer } from './meteorLayer';
 import { createSatelliteLayer } from './satelliteLayer';
+import { createSkyGuidesLayer } from './skyGuidesLayer';
 import { createSolarSystemLayer } from './solarSystemLayer';
 import { createStarfieldLayer } from './starfieldLayer';
 
 export interface LayerVisibilityState {
   constellations: boolean;
   boundaries: boolean;
+  milkyWay: boolean;
+  grid: boolean;
   labels: boolean;
   atmosphere: boolean;
   horizon: boolean;
@@ -94,6 +99,7 @@ export interface TelemetrySnapshot {
   timeMode: TimeMode;
   isPlaying: boolean;
   timeWarpMultiplier: number;
+  bortleClass: number;
   labels: ScreenLabelItem[];
   selectedObject: InspectedObjectTelemetry | null;
   selectedReticle: ReticleScreenPosition | null;
@@ -108,8 +114,10 @@ export interface SkyEngineOptions {
   canvas: HTMLCanvasElement;
   catalog: LoadedCelestialData;
   initialLocation: ObserverLocation;
+  initialBortleClass?: number;
   onTelemetry: (snapshot: TelemetrySnapshot) => void;
   onSelectObject?: (telemetry: InspectedObjectTelemetry | null) => void;
+  onContextLost?: (reason: string) => void;
 }
 
 function normalizeDeg360(deg: number): number {
@@ -147,8 +155,10 @@ export class SkyEngine {
   private readonly catalog: LoadedCelestialData;
   private readonly onTelemetry: (snapshot: TelemetrySnapshot) => void;
   private readonly onSelectObject?: (telemetry: InspectedObjectTelemetry | null) => void;
+  private readonly onContextLostCallback?: (reason: string) => void;
 
   private readonly atmosphere: ReturnType<typeof createAtmosphereDome>;
+  private readonly skyGuides: ReturnType<typeof createSkyGuidesLayer>;
   private readonly starfield: ReturnType<typeof createStarfieldLayer>;
   private readonly dso: ReturnType<typeof createDsoLayer>;
   private readonly solarSystem: ReturnType<typeof createSolarSystemLayer>;
@@ -164,6 +174,7 @@ export class SkyEngine {
   private readonly gyro: GyroSensorController;
   private calmModeEnabled = false;
   private calmZenHud = false;
+  private bortleClass = 4;
 
   private readonly dsoPickAnchors: Array<{ id: string; mag: number; j2000Vec: THREE.Vector3 }>;
 
@@ -177,6 +188,8 @@ export class SkyEngine {
   private layers: LayerVisibilityState = {
     constellations: true,
     boundaries: false,
+    milkyWay: true,
+    grid: false,
     labels: true,
     atmosphere: true,
     horizon: true,
@@ -205,6 +218,7 @@ export class SkyEngine {
 
   // Object inspection & tracking state
   private selectedRef: CelestialObjectRef | null = null;
+  private selectedTargetName: string | undefined = undefined;
   private isTrackingObject = false;
 
   private readonly eqToWorld = new THREE.Matrix4();
@@ -214,12 +228,39 @@ export class SkyEngine {
   private readonly tempRayJ2000 = new THREE.Vector3();
   private rafId = 0;
   private disposed = false;
+  private pausedByVisibility = false;
   private startPerfMs = performance.now();
   private lastFramePerfMs = performance.now();
   private fpsAccumFrames = 0;
   private fpsAccumSec = 0;
   private currentFps = 60;
   private lastHudPushMs = 0;
+  private lastEphemerisComputeMs = -Infinity;
+  private lastEphemerisLocKey = '';
+  private prefersReducedMotion = false;
+  private reducedMotionQuery: MediaQueryList | null = null;
+  private readonly handleReducedMotionChange = (e: MediaQueryListEvent): void => {
+    this.prefersReducedMotion = e.matches;
+  };
+  private readonly handleVisibilityChange = (): void => {
+    if (this.disposed || typeof document === 'undefined') return;
+    if (document.hidden) {
+      this.pausedByVisibility = true;
+      cancelAnimationFrame(this.rafId);
+      this.rafId = 0;
+    } else if (this.pausedByVisibility) {
+      this.pausedByVisibility = false;
+      this.lastFramePerfMs = performance.now();
+      this.lastHudPushMs = 0;
+      this.startLoop();
+    }
+  };
+  private readonly handleContextLost = (e: Event): void => {
+    e.preventDefault();
+    if (!this.disposed) {
+      this.onContextLostCallback?.('WebGL2 graphics context was lost.');
+    }
+  };
 
   // Pointer & touch gesture tracking
   private activePointers = new Map<number, { x: number; y: number }>();
@@ -240,6 +281,10 @@ export class SkyEngine {
     this.location = options.initialLocation;
     this.onTelemetry = options.onTelemetry;
     this.onSelectObject = options.onSelectObject;
+    this.onContextLostCallback = options.onContextLost;
+    if (typeof options.initialBortleClass === 'number' && Number.isFinite(options.initialBortleClass)) {
+      this.bortleClass = Math.max(1, Math.min(9, Math.round(options.initialBortleClass)));
+    }
 
     this.dsoPickAnchors = options.catalog.dsos.map((d) => {
       const [x, y, z] = raDecToJ2000UnitVector(d.raRad, d.decRad);
@@ -264,6 +309,7 @@ export class SkyEngine {
     this.camera.rotation.order = 'YXZ';
 
     this.atmosphere = createAtmosphereDome();
+    this.skyGuides = createSkyGuidesLayer();
     this.starfield = createStarfieldLayer(options.catalog.stars);
     this.dso = createDsoLayer(options.catalog.dsos);
     this.solarSystem = createSolarSystemLayer();
@@ -279,6 +325,7 @@ export class SkyEngine {
     this.meteorController = new MeteorShowerController();
 
     this.scene.add(this.atmosphere.mesh);
+    this.scene.add(this.skyGuides.group);
     this.scene.add(this.starfield.mesh);
     this.scene.add(this.dso.mesh);
     this.scene.add(this.solarSystem.group);
@@ -311,12 +358,20 @@ export class SkyEngine {
       this.lastHudPushMs = 0;
     });
 
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      this.reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+      this.prefersReducedMotion = this.reducedMotionQuery.matches;
+      this.reducedMotionQuery.addEventListener?.('change', this.handleReducedMotionChange);
+    }
+
     this.lastEphemeris = computeSolarSystemEphemeris(
       new Date(this.simTimestampMs),
       this.location.latitude,
       this.location.longitude,
       this.location.elevation,
     );
+    this.lastEphemerisComputeMs = this.simTimestampMs;
+    this.lastEphemerisLocKey = `${this.location.latitude.toFixed(3)},${this.location.longitude.toFixed(3)},${Math.round(this.location.elevation)}`;
     this.refreshAstroState();
 
     this.handleResize();
@@ -333,16 +388,30 @@ export class SkyEngine {
 
     await renderer.init();
 
-    const backend = renderer.backend as { isWebGPUBackend?: boolean } | undefined;
+    const backend = renderer.backend as {
+      isWebGPUBackend?: boolean;
+      device?: { lost?: Promise<{ message?: string }> };
+    } | undefined;
     const backendLabel: TelemetrySnapshot['backendLabel'] = backend?.isWebGPUBackend
       ? 'WebGPU · WGSL'
       : 'WebGL2 Fallback';
 
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    return new SkyEngine(options, renderer, backendLabel);
+    const engine = new SkyEngine(options, renderer, backendLabel);
+
+    const deviceLost = backend?.device?.lost;
+    if (deviceLost && typeof deviceLost.then === 'function') {
+      void deviceLost.then((info) => {
+        if (!engine.isDisposed()) {
+          options.onContextLost?.(info?.message || 'WebGPU graphics device was lost.');
+        }
+      });
+    }
+
+    return engine;
   }
 
-  private refreshAstroState(): Date {
+  private refreshAstroState(forceEphemeris = false): Date {
     const observedDate = new Date(this.simTimestampMs);
     computeEquatorialToWorldMatrix4(
       observedDate,
@@ -350,12 +419,21 @@ export class SkyEngine {
       this.location.longitude,
       this.eqToWorld,
     );
-    this.lastEphemeris = computeSolarSystemEphemeris(
-      observedDate,
-      this.location.latitude,
-      this.location.longitude,
-      this.location.elevation,
-    );
+    const locKey = `${this.location.latitude.toFixed(3)},${this.location.longitude.toFixed(3)},${Math.round(this.location.elevation)}`;
+    if (
+      forceEphemeris ||
+      locKey !== this.lastEphemerisLocKey ||
+      Math.abs(this.simTimestampMs - this.lastEphemerisComputeMs) >= 200
+    ) {
+      this.lastEphemeris = computeSolarSystemEphemeris(
+        observedDate,
+        this.location.latitude,
+        this.location.longitude,
+        this.location.elevation,
+      );
+      this.lastEphemerisComputeMs = this.simTimestampMs;
+      this.lastEphemerisLocKey = locKey;
+    }
     return observedDate;
   }
 
@@ -373,7 +451,7 @@ export class SkyEngine {
 
   setLocation(loc: ObserverLocation): void {
     this.location = loc;
-    this.refreshAstroState();
+    this.refreshAstroState(true);
     this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     void this.aircraftTracker.refreshLiveTraffic(
       this.location,
@@ -397,7 +475,7 @@ export class SkyEngine {
     if (mode === 'sunset' || mode === 'tonight') {
       this.simTimestampMs = computePresetDate(new Date(), this.location.longitude, mode).getTime();
     }
-    this.refreshAstroState();
+    this.refreshAstroState(true);
     this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     this.lastHudPushMs = 0;
   }
@@ -431,7 +509,7 @@ export class SkyEngine {
     if (!Number.isFinite(ms)) return;
     this.simTimestampMs = ms;
     this.timeMode = mode;
-    this.refreshAstroState();
+    this.refreshAstroState(true);
     this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     this.lastHudPushMs = 0;
   }
@@ -442,7 +520,7 @@ export class SkyEngine {
     nextDate.setHours(Math.floor(clamped / 60), clamped % 60, 0, 0);
     this.simTimestampMs = nextDate.getTime();
     this.timeMode = 'custom';
-    this.refreshAstroState();
+    this.refreshAstroState(true);
     this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     this.lastHudPushMs = 0;
   }
@@ -452,7 +530,7 @@ export class SkyEngine {
     this.isPlaying = true;
     this.timeWarpMultiplier = 1;
     this.simTimestampMs = Date.now();
-    this.refreshAstroState();
+    this.refreshAstroState(true);
     this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
     this.aircraftTracker.requestUpdate(
       this.simTimestampMs,
@@ -466,11 +544,69 @@ export class SkyEngine {
   }
 
   setLayers(next: Partial<LayerVisibilityState>): void {
+    const prev = this.layers;
     this.layers = { ...this.layers, ...next };
+    if (next.satellites === true && !prev.satellites) {
+      this.satTracker.requestUpdate(
+        this.simTimestampMs,
+        this.location,
+        this.getSelectedSatNoradId(),
+        true,
+      );
+    }
+    if (next.aircraft === true && !prev.aircraft) {
+      this.aircraftTracker.requestUpdate(
+        this.simTimestampMs,
+        this.location,
+        this.getSelectedAircraftHex(),
+        true,
+        this.eqToWorld,
+        true,
+      );
+    }
   }
 
   getLayers(): LayerVisibilityState {
     return { ...this.layers };
+  }
+
+  setBortleClass(bortleClass: number): void {
+    if (!Number.isFinite(bortleClass)) return;
+    this.bortleClass = Math.max(1, Math.min(9, Math.round(bortleClass)));
+    this.lastHudPushMs = 0;
+  }
+
+  getBortleClass(): number {
+    return this.bortleClass;
+  }
+
+  isDisposed(): boolean {
+    return this.disposed;
+  }
+
+  panBy(deltaAzDeg: number, deltaAltDeg: number): void {
+    this.slerpActive = false;
+    this.isTrackingObject = false;
+    if (this.gyro.isEnabled()) {
+      this.gyro.adjustCompassOffset(deltaAzDeg);
+      this.gyro.adjustSimulatedPitch(deltaAltDeg);
+      return;
+    }
+    this.targetAzDeg = normalizeDeg360(this.targetAzDeg + deltaAzDeg);
+    this.targetAltDeg = Math.max(-80, Math.min(89.5, this.targetAltDeg + deltaAltDeg));
+  }
+
+  getShareState(): SkyShareableState {
+    return {
+      lat: this.location.latitude,
+      lon: this.location.longitude,
+      timestampMs: this.simTimestampMs,
+      azDeg: this.azDeg,
+      altDeg: this.altDeg,
+      fovDeg: this.fovDeg,
+      bortleClass: this.bortleClass,
+      target: this.selectedRef ? this.selectedTargetName : undefined,
+    };
   }
 
   lookAt(azDeg: number, altDeg: number): void {
@@ -532,11 +668,14 @@ export class SkyEngine {
 
     if (!telemetry) {
       this.selectedRef = null;
+      this.selectedTargetName = undefined;
       this.isTrackingObject = false;
       this.onSelectObject?.(null);
       this.lastHudPushMs = 0;
       return null;
     }
+
+    this.selectedTargetName = telemetry.name;
 
     if (ref?.kind === 'satellite') {
       this.satTracker.requestUpdate(this.simTimestampMs, this.location, this.getSelectedSatNoradId(), true);
@@ -662,7 +801,7 @@ export class SkyEngine {
     this.timeMode = 'custom';
     this.isPlaying = true;
     this.timeWarpMultiplier = 1;
-    this.refreshAstroState();
+    this.refreshAstroState(true);
     this.satTracker.requestUpdate(this.simTimestampMs, this.location, pass.noradId, true);
     this.selectObject(
       { id: `sat-${pass.noradId}`, kind: 'satellite', satNoradId: pass.noradId },
@@ -711,6 +850,7 @@ export class SkyEngine {
       }
       this.setLayers({ atmosphere: true, horizon: true });
       this.selectedRef = null;
+      this.selectedTargetName = undefined;
       this.isTrackingObject = false;
       this.onSelectObject?.(null);
       this.flyTo(180, 20, 76);
@@ -1075,6 +1215,10 @@ export class SkyEngine {
 
   private bindEvents(): void {
     window.addEventListener('resize', this.handleResize);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    }
+    this.canvas.addEventListener('webglcontextlost', this.handleContextLost);
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
     this.canvas.addEventListener('pointermove', this.onPointerMove);
     this.canvas.addEventListener('pointerup', this.onPointerUp);
@@ -1166,7 +1310,9 @@ export class SkyEngine {
       const observedDate = this.refreshAstroState();
       const selectedSatId = this.getSelectedSatNoradId();
       const selectedAircraftHex = this.getSelectedAircraftHex();
-      this.satTracker.requestUpdate(this.simTimestampMs, this.location, selectedSatId);
+      if (this.layers.satellites || selectedSatId !== null) {
+        this.satTracker.requestUpdate(this.simTimestampMs, this.location, selectedSatId);
+      }
       this.aircraftTracker.requestUpdate(
         this.simTimestampMs,
         this.location,
@@ -1245,8 +1391,22 @@ export class SkyEngine {
 
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const elapsedSec = (nowMs - this.startPerfMs) / 1000;
+      const bortleProfile = getBortleProfile(this.bortleClass);
 
-      this.atmosphere.update(sun.worldDir, sun.altDeg, this.layers.atmosphere);
+      this.atmosphere.update(
+        sun.worldDir,
+        sun.altDeg,
+        this.layers.atmosphere,
+        bortleProfile.skyglowIntensity,
+      );
+      this.skyGuides.update({
+        eqToWorld: this.eqToWorld,
+        sunAltDeg: sun.altDeg,
+        showAtmosphere: this.layers.atmosphere,
+        bortleSkyglow: bortleProfile.skyglowIntensity,
+        showMilkyWay: this.layers.milkyWay,
+        showGrid: this.layers.grid,
+      });
       this.starfield.update({
         eqToWorld: this.eqToWorld,
         elapsedSec,
@@ -1256,6 +1416,7 @@ export class SkyEngine {
         viewportHeight: this.viewportHeight,
         pixelRatio: dpr,
         showAtmosphere: this.layers.atmosphere,
+        bortleClass: this.bortleClass,
       });
       this.dso.update({
         eqToWorld: this.eqToWorld,
@@ -1311,9 +1472,7 @@ export class SkyEngine {
       });
       this.horizon.setVisible(this.layers.horizon);
 
-      const reducedMotion =
-        typeof window !== 'undefined' &&
-        Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+      const reducedMotion = this.prefersReducedMotion;
       const activeMeteors = this.meteorController.update(
         nowMs,
         this.calmModeEnabled,
@@ -1439,6 +1598,7 @@ export class SkyEngine {
           timeMode: this.timeMode,
           isPlaying: this.isPlaying,
           timeWarpMultiplier: this.timeWarpMultiplier,
+          bortleClass: this.bortleClass,
           labels: [...compassLabels, ...mergedSkyLabels],
           selectedObject,
           selectedReticle,
@@ -1460,6 +1620,11 @@ export class SkyEngine {
     this.disposed = true;
     cancelAnimationFrame(this.rafId);
     window.removeEventListener('resize', this.handleResize);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    }
+    this.reducedMotionQuery?.removeEventListener?.('change', this.handleReducedMotionChange);
+    this.canvas.removeEventListener('webglcontextlost', this.handleContextLost);
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.canvas.removeEventListener('pointerup', this.onPointerUp);
@@ -1470,6 +1635,7 @@ export class SkyEngine {
     this.satTracker.dispose();
     this.aircraftTracker.dispose();
     this.atmosphere.dispose();
+    this.skyGuides.dispose();
     this.starfield.dispose();
     this.dso.dispose();
     this.solarSystem.dispose();

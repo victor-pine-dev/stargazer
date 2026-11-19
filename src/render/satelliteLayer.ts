@@ -97,6 +97,11 @@ function createOrbitArcLine(name: string, renderOrder: number) {
   line.renderOrder = renderOrder;
   line.visible = false;
 
+  const baseColor = new THREE.Color();
+  const eclipsedColor = new THREE.Color('#64748b');
+  const futureTint = new THREE.Color('#e0f2fe');
+  const futureColor = new THREE.Color();
+
   const updateArc = (
     points: SatelliteOrbitArcPoint[],
     baseColorHex: string,
@@ -108,9 +113,8 @@ function createOrbitArcLine(name: string, renderOrder: number) {
       return;
     }
 
-    const baseColor = new THREE.Color(baseColorHex);
-    const eclipsedColor = new THREE.Color('#64748b');
-    const futureColor = baseColor.clone().lerp(new THREE.Color('#e0f2fe'), 0.25);
+    baseColor.set(baseColorHex);
+    futureColor.copy(baseColor).lerp(futureTint, 0.25);
 
     let vertexCount = 0;
     const maxSegments = Math.floor(MAX_ARC_VERTICES / 2);

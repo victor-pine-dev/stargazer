@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <radialGradient id="sky" cx="50%" cy="42%" r="65%">
+      <stop offset="0%" stop-color="#0f2347" />
+      <stop offset="65%" stop-color="#070e22" />
+      <stop offset="100%" stop-color="#030712" />
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.95" />
+      <stop offset="45%" stop-color="#38bdf8" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#38bdf8" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#sky)" />
+  <circle cx="256" cy="256" r="168" stroke="#38bdf8" stroke-opacity="0.28" stroke-width="6" />
+  <ellipse cx="256" cy="256" rx="196" ry="74" transform="rotate(-24 256 256)" stroke="#7dd3fc" stroke-opacity="0.48" stroke-width="5" />
+  <circle cx="256" cy="256" r="110" fill="url(#glow)" />
+  <path d="M256 140 L277 235 L372 256 L277 277 L256 372 L235 277 L140 256 L235 235 Z" fill="#f8fafc" />
+  <circle cx="152" cy="144" r="9" fill="#fde68a" />
+  <circle cx="372" cy="156" r="7" fill="#bae6fd" />
+  <circle cx="350" cy="364" r="8" fill="#a7f3d0" />
+</svg>

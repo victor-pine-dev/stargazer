@@ -29,6 +29,9 @@ module.exports = async function (context, req) {
       body: JSON.stringify(result),
     };
   } catch (err) {
+    if (context && context.log && typeof context.log.warn === 'function') {
+      context.log.warn('ADS-B proxy upstream failure:', err);
+    }
     context.res = {
       status: 502,
       headers: {
@@ -36,7 +39,7 @@ module.exports = async function (context, req) {
         'Cache-Control': 'no-store',
       },
       body: JSON.stringify({
-        error: err instanceof Error ? err.message : 'Unable to reach open ADS-B data providers.',
+        error: 'Unable to reach open ADS-B data providers.',
       }),
     };
   }

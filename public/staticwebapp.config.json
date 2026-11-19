@@ -18,6 +18,12 @@
       "headers": {
         "Cache-Control": "public, max-age=31536000, immutable"
       }
+    },
+    {
+      "route": "/sw.js",
+      "headers": {
+        "Cache-Control": "no-cache"
+      }
     }
   ],
   "navigationFallback": {
@@ -26,6 +32,9 @@
       "/api/*",
       "/assets/*",
       "/data/*",
+      "/sw.js",
+      "/manifest.webmanifest",
+      "/icon.svg",
       "*.bin",
       "*.json",
       "*.js",
@@ -33,16 +42,22 @@
       "*.ico",
       "*.png",
       "*.svg",
-      "*.webp"
+      "*.webp",
+      "*.webmanifest"
     ]
   },
   "mimeTypes": {
     ".bin": "application/octet-stream",
     ".json": "application/json",
-    ".wasm": "application/wasm"
+    ".wasm": "application/wasm",
+    ".webmanifest": "application/manifest+json"
   },
   "globalHeaders": {
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "strict-origin-when-cross-origin"
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "Permissions-Policy": "geolocation=(self), accelerometer=(self), gyroscope=(self), magnetometer=(self), camera=(), microphone=()",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://celestrak.org https://opendata.adsb.fi https://api.adsb.fi https://api.adsb.lol https://opensky-network.org; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
   }
 }

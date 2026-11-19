@@ -4,6 +4,32 @@ const METERS_TO_FEET = 3.280839895013123;
 const MPS_TO_KNOTS = 1.9438444924406048;
 const MPS_TO_FPM = 196.8503937007874;
 const NM_TO_KM = 1.852;
+const DEFAULT_TIMEOUT_MS = 2400;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_RETURNED_AIRCRAFT = 160;
+const CACHE_TTL_MS = 6000;
+const MAX_CACHE_ENTRIES = 64;
+const GEO_BUCKET_DEG = 0.05;
+
+const responseCache = new Map();
+const inFlightRequests = new Map();
+
+function buildGeoBucketKey(lat, lon, radiusNm) {
+  const qLat = clamp(Math.round(lat / GEO_BUCKET_DEG) * GEO_BUCKET_DEG, -90, 90);
+  const qLon = clamp(Math.round(lon / GEO_BUCKET_DEG) * GEO_BUCKET_DEG, -180, 180);
+  const qRad = Math.min(150, Math.max(10, Math.ceil(radiusNm / 10) * 10));
+  return {
+    key: `${qLat.toFixed(2)},${qLon.toFixed(2)},${qRad}`,
+    qLat,
+    qLon,
+    qRad,
+  };
+}
+
+function clearAdsbProxyCache() {
+  responseCache.clear();
+  inFlightRequests.clear();
+}
 
 function clamp(val, min, max) {
   return Math.max(min, Math.min(max, val));
@@ -73,6 +99,7 @@ function normalizeReadsbList(items, fetchedAtMs) {
       category: typeof ac.category === 'string' ? ac.category.trim() : '',
       fetchedAtMs: posTimestampMs,
     });
+    if (out.length >= MAX_RETURNED_AIRCRAFT) break;
   }
 
   return out;
@@ -131,12 +158,13 @@ function normalizeOpenSkyPayload(payload, fetchedAtMs) {
       category: '',
       fetchedAtMs: posTimestampMs,
     });
+    if (out.length >= MAX_RETURNED_AIRCRAFT) break;
   }
 
   return out;
 }
 
-async function fetchJsonWithTimeout(url, timeoutMs = 4500) {
+async function fetchJsonWithTimeout(url, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -151,13 +179,24 @@ async function fetchJsonWithTimeout(url, timeoutMs = 4500) {
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
+    const contentLength = Number(res.headers?.get?.('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) {
+      throw new Error('Payload too large');
+    }
+    if (typeof res.text === 'function') {
+      const text = await res.text();
+      if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES || text.length > MAX_RESPONSE_BYTES) {
+        throw new Error('Payload too large');
+      }
+      return JSON.parse(text);
+    }
     return await res.json();
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function fetchNormalizedAdsb(lat, lon, radiusNm) {
+async function fetchUpstreamAdsb(lat, lon, radiusNm) {
   const fetchedAtMs = Date.now();
   const latStr = lat.toFixed(4);
   const lonStr = lon.toFixed(4);
@@ -229,7 +268,46 @@ async function fetchNormalizedAdsb(lat, lon, radiusNm) {
   throw new Error(`All open ADS-B providers failed (${errors.join('; ')})`);
 }
 
+async function fetchNormalizedAdsb(lat, lon, radiusNm) {
+  const { key, qLat, qLon, qRad } = buildGeoBucketKey(lat, lon, radiusNm);
+  const nowMs = Date.now();
+  const cached = responseCache.get(key);
+  if (cached && nowMs - cached.cachedAtMs < CACHE_TTL_MS) {
+    return cached.payload;
+  }
+  if (cached) {
+    responseCache.delete(key);
+  }
+
+  const inFlight = inFlightRequests.get(key);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const pending = fetchUpstreamAdsb(qLat, qLon, qRad)
+    .then((payload) => {
+      if (responseCache.size >= MAX_CACHE_ENTRIES) {
+        const oldestKey = responseCache.keys().next().value;
+        if (oldestKey !== undefined) {
+          responseCache.delete(oldestKey);
+        }
+      }
+      responseCache.set(key, { cachedAtMs: Date.now(), payload });
+      return payload;
+    })
+    .finally(() => {
+      inFlightRequests.delete(key);
+    });
+
+  inFlightRequests.set(key, pending);
+  return pending;
+}
+
 module.exports = {
   parseQueryParams,
+  normalizeReadsbList,
+  normalizeOpenSkyPayload,
   fetchNormalizedAdsb,
+  buildGeoBucketKey,
+  clearAdsbProxyCache,
 };

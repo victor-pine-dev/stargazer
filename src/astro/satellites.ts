@@ -654,19 +654,40 @@ interface StoredTleCache {
   records: SatelliteTleRecord[];
 }
 
+function isValidCachedTleRecord(raw: unknown): raw is SatelliteTleRecord {
+  if (!raw || typeof raw !== 'object') return false;
+  const r = raw as Record<string, unknown>;
+  return (
+    typeof r.noradId === 'number' &&
+    Number.isFinite(r.noradId) &&
+    typeof r.id === 'string' &&
+    typeof r.name === 'string' &&
+    typeof r.line1 === 'string' &&
+    typeof r.line2 === 'string' &&
+    typeof r.baseMag === 'number' &&
+    Number.isFinite(r.baseMag)
+  );
+}
+
 function readCachedTles(allowExpired = false): SatelliteTleRecord[] | null {
   try {
     if (typeof localStorage === 'undefined') return null;
     const raw = localStorage.getItem(TLE_CACHE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredTleCache>;
-    if (!Array.isArray(parsed.records) || typeof parsed.fetchedAtMs !== 'number') {
+    if (
+      !parsed ||
+      !Array.isArray(parsed.records) ||
+      typeof parsed.fetchedAtMs !== 'number' ||
+      !Number.isFinite(parsed.fetchedAtMs)
+    ) {
       return null;
     }
     if (!allowExpired && Date.now() - parsed.fetchedAtMs > TLE_CACHE_TTL_MS) {
       return null;
     }
-    return parsed.records;
+    const validRecords = parsed.records.filter(isValidCachedTleRecord);
+    return validRecords.length > 0 ? validRecords : null;
   } catch {
     return null;
   }
